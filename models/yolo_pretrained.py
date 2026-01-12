@@ -1,6 +1,10 @@
 """
-Modèle YOLO pour la Segmentation - Utilisant Ultralytics
-Méthode 2 : Utilisation de fonctions prédéfinies (YOLOv8-seg)
+Modèle YOLO pour la Détection - Utilisant Ultralytics
+Méthode 2 : Utilisation de fonctions prédéfinies (YOLOv8)
+
+Note: Utilise le modèle de détection (bounding boxes) car le dataset RDD2022
+      contient des annotations en format YOLO detection (class x y w h),
+      pas des polygones de segmentation.
 """
 
 import os
@@ -22,21 +26,22 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 from utils.config import *
 
 
-class YOLOSegmentation:
+class YOLODetection:
     """
-    Classe wrapper pour YOLOv8 Segmentation
+    Classe wrapper pour YOLOv8 Detection
     Utilise les fonctions prédéfinies d'Ultralytics
+    Note: Utilise le modèle de détection car le dataset RDD2022 a des labels bounding box
     """
-    
-    def __init__(self, 
-                 model_name: str = 'yolov8n-seg.pt',
+
+    def __init__(self,
+                 model_name: str = 'yolov8n.pt',
                  num_classes: int = NUM_CLASSES,
                  img_size: int = 640):
         """
-        Initialise le modèle YOLO pour la segmentation
-        
+        Initialise le modèle YOLO pour la détection
+
         Args:
-            model_name: Nom du modèle YOLO ('yolov8n-seg.pt', 'yolov8s-seg.pt', etc.)
+            model_name: Nom du modèle YOLO ('yolov8n.pt', 'yolov8s.pt', etc.)
             num_classes: Nombre de classes (sans background)
             img_size: Taille des images pour YOLO
         """
@@ -48,7 +53,7 @@ class YOLOSegmentation:
         self.img_size = img_size
         self.model = None
         
-        print(f"✅ YOLOSegmentation initialisé")
+        print(f"✅ YOLODetection initialisé")
         print(f"   - Modèle: {model_name}")
         print(f"   - Classes: {num_classes}")
         print(f"   - Image size: {img_size}")
@@ -116,7 +121,7 @@ class YOLOSegmentation:
             imgsz = self.img_size
         
         print("\n" + "=" * 80)
-        print("ENTRAÎNEMENT YOLO SEGMENTATION")
+        print("ENTRAÎNEMENT YOLO DETECTION")
         print("=" * 80)
         print(f"Configuration:")
         print(f"  - Epochs: {epochs}")
@@ -240,52 +245,50 @@ class YOLOSegmentation:
         
         return info
     
-    def convert_masks_to_segmentation(self, results, target_size: Tuple[int, int] = IMG_SIZE):
+    def convert_detections_to_mask(self, results, target_size: Tuple[int, int] = IMG_SIZE):
         """
-        Convertit les masques YOLO en format de segmentation compatible avec U-Net
-        
+        Convertit les détections YOLO (bounding boxes) en masque de segmentation simplifié
+
         Args:
             results: Résultats de prédiction YOLO
             target_size: Taille cible (height, width)
-            
+
         Returns:
-            Masque de segmentation (H, W) avec class IDs
+            Masque de segmentation (H, W) avec class IDs remplis dans les bounding boxes
         """
         masks_list = []
-        
+
         for result in results:
-            if result.masks is None:
-                # Pas de masques détectés
-                mask = np.zeros(target_size, dtype=np.uint8)
-            else:
-                # Créer un masque vide
-                mask = np.zeros(target_size, dtype=np.uint8)
-                
-                # Récupérer les masques et les classes
-                masks = result.masks.data.cpu().numpy()  # (N, H, W)
+            # Créer un masque vide
+            mask = np.zeros(target_size, dtype=np.uint8)
+
+            if result.boxes is not None and len(result.boxes) > 0:
                 boxes = result.boxes
-                classes = boxes.cls.cpu().numpy().astype(int)  # Class IDs
-                
-                # Redimensionner et fusionner les masques
-                for i, (m, cls) in enumerate(zip(masks, classes)):
-                    # Redimensionner le masque
-                    m_resized = cv2.resize(m, (target_size[1], target_size[0]))
-                    m_binary = (m_resized > 0.5).astype(np.uint8)
-                    
-                    # Mapper class_id: 0->1, 1->2, 2->3, 4->4
+                # Récupérer les coordonnées normalisées et les classes
+                xyxyn = boxes.xyxyn.cpu().numpy()  # Normalized coords (x1, y1, x2, y2)
+                classes = boxes.cls.cpu().numpy().astype(int)
+
+                h, w = target_size
+
+                for (x1, y1, x2, y2), cls in zip(xyxyn, classes):
+                    # Convertir en coordonnées pixels
+                    px1, py1 = int(x1 * w), int(y1 * h)
+                    px2, py2 = int(x2 * w), int(y2 * h)
+
+                    # Mapper class_id: 0->1, 1->2, 2->3, 4->4 (background = 0)
                     if cls == 4:
                         mask_value = 4
                     else:
                         mask_value = cls + 1
-                    
-                    # Appliquer au masque final
-                    mask[m_binary > 0] = mask_value
-            
+
+                    # Remplir la bounding box dans le masque
+                    mask[py1:py2, px1:px2] = mask_value
+
             masks_list.append(mask)
-        
+
         if len(masks_list) == 1:
             return masks_list[0]
-        
+
         return np.array(masks_list)
 
 
@@ -312,16 +315,19 @@ def create_yolo_data_yaml(train_path: str,
     import yaml
     
     # Configuration pour RDD2022
+    # Note: Le dataset RDD2022 utilise les classes 0, 1, 2, 4 (pas de classe 3)
+    # On déclare 5 classes (0-4) pour que YOLO accepte les labels avec class_id=4
     data_config = {
         'path': os.path.dirname(train_path),  # Chemin racine
         'train': os.path.basename(train_path),
         'val': os.path.basename(val_path),
-        'nc': NUM_CLASSES,  # Nombre de classes (sans background)
+        'nc': 5,  # 5 classes pour supporter class_id 0-4
         'names': {
             0: 'Longitudinal',
             1: 'Transverse',
             2: 'Crocodile',
-            3: 'Pothole'  # Note: class 4 devient 3 pour YOLO
+            3: 'Unused',  # Classe non utilisée dans RDD2022
+            4: 'Pothole'
         }
     }
     
@@ -340,25 +346,25 @@ def create_yolo_data_yaml(train_path: str,
 def create_yolo_model(model_size: str = 'n', pretrained: bool = True):
     """
     Fonction helper pour créer rapidement un modèle YOLO
-    
+
     Args:
         model_size: Taille du modèle ('n', 's', 'm', 'l', 'x')
         pretrained: Si True, charge les poids pré-entraînés
-        
+
     Returns:
-        Instance de YOLOSegmentation
+        Instance de YOLODetection
     """
-    model_name = f'yolov8{model_size}-seg.pt' if pretrained else f'yolov8{model_size}-seg.yaml'
-    
-    yolo = YOLOSegmentation(
+    model_name = f'yolov8{model_size}.pt' if pretrained else f'yolov8{model_size}.yaml'
+
+    yolo = YOLODetection(
         model_name=model_name,
-        num_classes=NUM_CLASSES,
+        num_classes=5,  # 5 classes pour RDD2022 (0, 1, 2, 3-unused, 4)
         img_size=YOLO_CONFIG['img_size']
     )
-    
+
     if pretrained:
         yolo.load_pretrained()
-    
+
     return yolo
 
 
@@ -371,7 +377,7 @@ def test_yolo():
     Fonction de test du modèle YOLO
     """
     print("\n" + "=" * 100)
-    print("TEST DU MODÈLE YOLO SEGMENTATION")
+    print("TEST DU MODÈLE YOLO DETECTION")
     print("=" * 100)
     
     if not ULTRALYTICS_AVAILABLE:
@@ -395,9 +401,9 @@ def test_yolo():
         results = yolo.predict(source=test_image, conf=0.25, save=False)
         print("✅ Prédiction réussie!")
         print(f"  - Nombre de résultats: {len(results)}")
-        
-        # Convertir en masque de segmentation
-        mask = yolo.convert_masks_to_segmentation(results, target_size=(256, 256))
+
+        # Convertir en masque (depuis bounding boxes)
+        mask = yolo.convert_detections_to_mask(results, target_size=(256, 256))
         print(f"  - Masque converti: {mask.shape}")
         print(f"  - Classes présentes: {np.unique(mask)}")
         

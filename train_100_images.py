@@ -257,7 +257,7 @@ def train_yolo_100(data_path, epochs=NUM_EPOCHS):
     
     try:
         from ultralytics import YOLO
-        from models.yolo_pretrained import YOLOSegmentation, create_yolo_data_yaml
+        from models.yolo_pretrained import YOLODetection, create_yolo_data_yaml
         import shutil
         from pathlib import Path
         
@@ -310,11 +310,11 @@ def train_yolo_100(data_path, epochs=NUM_EPOCHS):
             output_path=str(yaml_path)
         )
         
-        # Créer le modèle YOLO
+        # Créer le modèle YOLO (détection, pas segmentation)
         print("\n🏗️  Chargement YOLO...")
-        yolo = YOLOSegmentation(
-            model_name='yolov8n-seg.pt',
-            num_classes=NUM_CLASSES,
+        yolo = YOLODetection(
+            model_name='yolov8n.pt',
+            num_classes=5,  # 5 classes pour supporter class_id 0-4
             img_size=640
         )
         yolo.load_pretrained()
