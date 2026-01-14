@@ -94,7 +94,7 @@ UNET_CONFIG = {
 # CONFIGURATION YOLO
 # ============================================================================
 YOLO_CONFIG = {
-    'model_name': 'yolov8n-seg.pt',  # YOLOv8 nano pour la segmentation
+    'model_name': 'yolov8n.pt',  # YOLOv8 nano pour la détection (dataset RDD2022 = bboxes)
     'img_size': 640,
     'conf_threshold': 0.25,
     'iou_threshold': 0.45,
