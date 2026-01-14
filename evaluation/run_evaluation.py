@@ -266,8 +266,10 @@ for model_name, model in models.items():
 print("\n📊 PHASE 4: Génération des visualisations")
 print("-"*100)
 
-# Créer le dossier de sortie
-output_dir = "/home/claude/evaluation_fixed/results"
+# Créer le dossier de sortie (dans le dossier du projet)
+script_dir = os.path.dirname(os.path.abspath(__file__))
+project_dir = os.path.dirname(script_dir)
+output_dir = os.path.join(project_dir, "results", "evaluation")
 os.makedirs(output_dir, exist_ok=True)
 
 # 1. Comparaison globale
