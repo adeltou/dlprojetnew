@@ -16,7 +16,7 @@ import seaborn as sns
 from pathlib import Path
 
 # Configuration de base
-IMG_SIZE = (128, 128)
+IMG_SIZE = (256, 256)
 NUM_CLASSES = 4  # Sans compter le background
 CLASS_NAMES = {
     0: "Fissure Longitudinale",
@@ -50,7 +50,7 @@ def load_image(image_path):
     img = img.astype(np.float32) / 255.0
     return img
 
-def load_yolo_mask(label_path, image_shape=(128, 128)):
+def load_yolo_mask(label_path, image_shape=(256, 256)):
     """
     Charge un label YOLO et le convertit en masque de segmentation
     
