@@ -489,7 +489,7 @@ def train_yolo(data_path: str,
     # Charger les résultats CSV générés par YOLO
     yolo_results_csv = os.path.join(project_dir, run_name, 'results.csv')
 
-    # Initialiser l'historique des métriques
+    # Initialiser l'historique des métriques (même format que U-Net et Hybrid)
     history = {
         'loss': [],
         'val_loss': [],
@@ -498,14 +498,20 @@ def train_yolo(data_path: str,
         'dice_coefficient': [],
         'val_dice_coefficient': [],
         'iou': [],
-        'val_iou': []
+        'val_iou': [],
+        'lr': []  # Learning rate comme U-Net et Hybrid
     }
     epoch_data = []
+
+    # Learning rate de YOLO (cosine scheduler par défaut)
+    initial_lr = learning_rate
+    final_lr = learning_rate * 0.01  # lrf par défaut
 
     if os.path.exists(yolo_results_csv):
         # Lire les résultats YOLO
         df = pd.read_csv(yolo_results_csv)
         df.columns = df.columns.str.strip()
+        total_epochs = len(df)
 
         for idx, row in df.iterrows():
             # Extraire les losses de YOLO
@@ -515,6 +521,10 @@ def train_yolo(data_path: str,
             val_loss = float(row.get('val/box_loss', 0) +
                             row.get('val/cls_loss', 0) +
                             row.get('val/dfl_loss', 0))
+
+            # Extraire le learning rate (approximation du cosine scheduler)
+            progress = idx / max(1, total_epochs - 1)
+            current_lr = initial_lr * (1 - progress) + final_lr * progress
 
             # Utiliser mAP comme proxy pour les métriques
             map50 = float(row.get('metrics/mAP50(B)', 0))
@@ -537,6 +547,7 @@ def train_yolo(data_path: str,
             history['val_dice_coefficient'].append(val_dice)
             history['iou'].append(train_iou)
             history['val_iou'].append(val_iou)
+            history['lr'].append(current_lr)
 
             epoch_data.append({
                 'epoch': idx + 1,
@@ -548,7 +559,8 @@ def train_yolo(data_path: str,
                 'val_loss': val_loss,
                 'val_accuracy': val_accuracy,
                 'val_dice_coefficient': val_dice,
-                'val_iou': val_iou
+                'val_iou': val_iou,
+                'lr': current_lr
             })
 
     # ========================================================================
@@ -586,11 +598,11 @@ def train_yolo(data_path: str,
         print("\n PHASE 8: Sauvegarde des resultats")
         print("-" * 100)
 
-        # Sauvegarder le CSV au format standard
+        # Sauvegarder le CSV au format standard (même format que U-Net et Hybrid)
         with open(csv_log_path, 'w', newline='') as f:
             writer = csv.writer(f)
             writer.writerow(['epoch', 'loss', 'accuracy', 'dice_coefficient', 'iou',
-                           'val_loss', 'val_accuracy', 'val_dice_coefficient', 'val_iou'])
+                           'val_loss', 'val_accuracy', 'val_dice_coefficient', 'val_iou', 'lr'])
             for i in range(len(history['loss'])):
                 writer.writerow([
                     i + 1,
@@ -601,7 +613,8 @@ def train_yolo(data_path: str,
                     history['val_loss'][i],
                     history['val_accuracy'][i],
                     history['val_dice_coefficient'][i],
-                    history['val_iou'][i]
+                    history['val_iou'][i],
+                    history['lr'][i] if history['lr'] else learning_rate
                 ])
 
         # Sauvegarder les métriques détaillées en JSON
