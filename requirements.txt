@@ -1,0 +1,46 @@
+# ==============================================
+# Requirements pour le projet Deep Learning
+# Segmentation d'images avec U-Net, Hybride et YOLO
+# ==============================================
+
+# === Calcul numérique ===
+numpy>=1.21.0
+
+# === Deep Learning - TensorFlow/Keras ===
+# (pour U-Net et modèle hybride)
+tensorflow>=2.10.0
+
+# === Deep Learning - PyTorch ===
+# (requis pour YOLO/Ultralytics)
+torch>=1.13.0
+torchvision>=0.14.0
+
+# === YOLO - Ultralytics ===
+ultralytics>=8.0.0
+
+# === Traitement d'images ===
+opencv-python>=4.5.0
+albumentations>=1.3.0
+
+# === Machine Learning - Métriques ===
+scikit-learn>=1.0.0
+
+# === Visualisation ===
+matplotlib>=3.5.0
+seaborn>=0.12.0
+
+# === Manipulation de données ===
+pandas>=1.4.0
+
+# === Utilitaires ===
+pyyaml>=6.0
+tqdm>=4.64.0
+
+# ==============================================
+# Installation rapide :
+# pip install -r requirements.txt
+#
+# Pour GPU (NVIDIA CUDA) :
+# pip install tensorflow[and-cuda]
+# pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118
+# ==============================================
