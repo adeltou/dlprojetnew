@@ -230,17 +230,15 @@ def overlay_mask_on_image(image, mask, alpha=0.5):
     """Superpose le masque coloré sur l'image originale"""
     colored_mask = mask_to_colored_image(mask)
 
-    # Créer l'overlay uniquement où il y a des détections
-    overlay = image.copy()
+    # Créer l'overlay avec cv2.addWeighted sur l'image entière
+    overlay = cv2.addWeighted(image, 1-alpha, colored_mask, alpha, 0)
+
+    # Garder l'image originale là où il n'y a pas de détection
     detection_mask = mask > 0
+    result = image.copy()
+    result[detection_mask] = overlay[detection_mask]
 
-    overlay[detection_mask] = cv2.addWeighted(
-        image[detection_mask], 1-alpha,
-        colored_mask[detection_mask], alpha,
-        0
-    )
-
-    return overlay
+    return result
 
 
 # =============================================================================
