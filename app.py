@@ -7,10 +7,14 @@ Master 2 HPC - 2025-2026
 import streamlit as st
 import json
 import os
+import sys
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 from pathlib import Path
+from PIL import Image
+import cv2
+import time
 
 # Configuration de la page
 st.set_page_config(
@@ -23,12 +27,225 @@ st.set_page_config(
 BASE_DIR = Path(__file__).parent
 FIGURES_DIR = BASE_DIR / "results" / "figures"
 LOGS_DIR = BASE_DIR / "results" / "logs"
+MODELS_DIR = BASE_DIR / "results" / "models"
+
+# Ajouter le répertoire racine au path
+sys.path.insert(0, str(BASE_DIR))
 
 # Fichiers de métriques
 UNET_METRICS = LOGS_DIR / "unet_100img_20260109_232107_metrics.json"
 YOLO_METRICS = LOGS_DIR / "yolo_training_results.json"
 HYBRID_METRICS = LOGS_DIR / "hybrid_100img_20260110_231216_metrics.json"
 
+# Configuration
+IMG_SIZE = (256, 256)
+NUM_CLASSES = 5  # 4 classes + background
+
+# Classes de dommages
+CLASS_NAMES = {
+    0: "Background",
+    1: "Fissure longitudinale",
+    2: "Fissure transversale",
+    3: "Fissure crocodile",
+    4: "Nid-de-poule"
+}
+
+# Couleurs pour la visualisation (RGB)
+CLASS_COLORS = {
+    0: (0, 0, 0),         # Noir pour background
+    1: (255, 0, 0),       # Rouge pour longitudinale
+    2: (0, 255, 0),       # Vert pour transversale
+    3: (0, 0, 255),       # Bleu pour crocodile
+    4: (255, 255, 0)      # Jaune pour nid-de-poule
+}
+
+
+# =============================================================================
+# FONCTIONS DE CHARGEMENT DES MODÈLES
+# =============================================================================
+
+@st.cache_resource
+def load_unet_model():
+    """Charge le modèle U-Net"""
+    try:
+        from models.unet_scratch import create_unet_model
+        model = create_unet_model(
+            input_shape=(256, 256, 3),
+            num_classes=NUM_CLASSES,
+            compile_model=False
+        )
+        # Chercher les poids sauvegardés
+        weights_path = MODELS_DIR / "unet_best.h5"
+        if weights_path.exists():
+            model.load_weights(str(weights_path))
+            return model, True
+        return model, False
+    except Exception as e:
+        st.warning(f"Impossible de charger U-Net: {e}")
+        return None, False
+
+
+@st.cache_resource
+def load_hybrid_model():
+    """Charge le modèle Hybride"""
+    try:
+        from models.hybrid_model import create_hybrid_model
+        model = create_hybrid_model(
+            input_shape=(256, 256, 3),
+            num_classes=NUM_CLASSES,
+            compile_model=False
+        )
+        # Chercher les poids sauvegardés
+        weights_path = MODELS_DIR / "hybrid_best.h5"
+        if weights_path.exists():
+            model.load_weights(str(weights_path))
+            return model, True
+        return model, False
+    except Exception as e:
+        st.warning(f"Impossible de charger Hybrid: {e}")
+        return None, False
+
+
+@st.cache_resource
+def load_yolo_model():
+    """Charge le modèle YOLO"""
+    try:
+        from ultralytics import YOLO
+        # Chercher un modèle YOLO entraîné
+        trained_path = MODELS_DIR / "yolo_best.pt"
+        if trained_path.exists():
+            model = YOLO(str(trained_path))
+            return model, True
+        # Sinon charger le modèle pré-entraîné
+        pretrained_path = BASE_DIR / "yolov8n.pt"
+        if pretrained_path.exists():
+            model = YOLO(str(pretrained_path))
+            return model, False
+        return None, False
+    except Exception as e:
+        st.warning(f"Impossible de charger YOLO: {e}")
+        return None, False
+
+
+# =============================================================================
+# FONCTIONS DE PRÉDICTION
+# =============================================================================
+
+def preprocess_image(image, target_size=IMG_SIZE):
+    """Prétraite l'image pour les modèles"""
+    if isinstance(image, Image.Image):
+        image = np.array(image)
+
+    # Convertir en RGB si nécessaire
+    if len(image.shape) == 2:
+        image = cv2.cvtColor(image, cv2.COLOR_GRAY2RGB)
+    elif image.shape[2] == 4:
+        image = cv2.cvtColor(image, cv2.COLOR_RGBA2RGB)
+
+    # Redimensionner
+    image_resized = cv2.resize(image, target_size)
+
+    # Normaliser
+    image_normalized = image_resized.astype(np.float32) / 255.0
+
+    return image_resized, image_normalized
+
+
+def predict_unet(model, image_normalized):
+    """Effectue une prédiction avec U-Net"""
+    # Ajouter la dimension batch
+    input_tensor = np.expand_dims(image_normalized, axis=0)
+
+    # Prédiction
+    start_time = time.time()
+    prediction = model.predict(input_tensor, verbose=0)
+    inference_time = time.time() - start_time
+
+    # Récupérer le masque de segmentation
+    mask = np.argmax(prediction[0], axis=-1)
+    confidence = np.max(prediction[0], axis=-1)
+
+    return mask, confidence, inference_time
+
+
+def predict_hybrid(model, image_normalized):
+    """Effectue une prédiction avec le modèle Hybride"""
+    # Ajouter la dimension batch
+    input_tensor = np.expand_dims(image_normalized, axis=0)
+
+    # Prédiction
+    start_time = time.time()
+    prediction = model.predict(input_tensor, verbose=0)
+    inference_time = time.time() - start_time
+
+    # Récupérer le masque de segmentation
+    mask = np.argmax(prediction[0], axis=-1)
+    confidence = np.max(prediction[0], axis=-1)
+
+    return mask, confidence, inference_time
+
+
+def predict_yolo(model, image):
+    """Effectue une prédiction avec YOLO"""
+    start_time = time.time()
+    results = model.predict(source=image, conf=0.25, verbose=False)
+    inference_time = time.time() - start_time
+
+    # Convertir les détections en masque
+    mask = np.zeros(IMG_SIZE, dtype=np.uint8)
+    confidence_map = np.zeros(IMG_SIZE, dtype=np.float32)
+
+    for result in results:
+        if result.boxes is not None and len(result.boxes) > 0:
+            boxes = result.boxes
+            xyxyn = boxes.xyxyn.cpu().numpy()
+            classes = boxes.cls.cpu().numpy().astype(int)
+            confs = boxes.conf.cpu().numpy()
+
+            h, w = IMG_SIZE
+            for (x1, y1, x2, y2), cls, conf in zip(xyxyn, classes, confs):
+                px1, py1 = int(x1 * w), int(y1 * h)
+                px2, py2 = int(x2 * w), int(y2 * h)
+
+                # Mapper les classes (YOLO utilise 0-3, on ajoute 1 pour background)
+                mask_value = cls + 1 if cls < 4 else 4
+                mask[py1:py2, px1:px2] = mask_value
+                confidence_map[py1:py2, px1:px2] = conf
+
+    return mask, confidence_map, inference_time
+
+
+def mask_to_colored_image(mask):
+    """Convertit un masque en image colorée"""
+    h, w = mask.shape
+    colored = np.zeros((h, w, 3), dtype=np.uint8)
+
+    for class_id, color in CLASS_COLORS.items():
+        colored[mask == class_id] = color
+
+    return colored
+
+
+def overlay_mask_on_image(image, mask, alpha=0.5):
+    """Superpose le masque coloré sur l'image originale"""
+    colored_mask = mask_to_colored_image(mask)
+
+    # Créer l'overlay uniquement où il y a des détections
+    overlay = image.copy()
+    detection_mask = mask > 0
+
+    overlay[detection_mask] = cv2.addWeighted(
+        image[detection_mask], 1-alpha,
+        colored_mask[detection_mask], alpha,
+        0
+    )
+
+    return overlay
+
+
+# =============================================================================
+# FONCTIONS D'AFFICHAGE DES MÉTRIQUES
+# =============================================================================
 
 def load_metrics():
     """Charge les métriques des trois architectures"""
@@ -100,6 +317,212 @@ def calculate_global_averages(metrics):
                 averages[arch_name][metric] = np.mean(arch_metrics[metric])
 
     return averages
+
+
+# =============================================================================
+# SECTIONS DE L'INTERFACE
+# =============================================================================
+
+def display_image_analysis():
+    """Section d'analyse d'image avec les 3 modèles"""
+    st.header("Analyse d'Image - Détection des Dommages Routiers")
+
+    st.markdown("""
+    Chargez une photo de route pour analyser les dommages avec nos 3 architectures de deep learning:
+    - **U-Net**: Architecture de segmentation sémantique
+    - **YOLO**: Détection d'objets (bounding boxes converties en masque)
+    - **Hybride**: Combinaison U-Net + YOLO avec attention gates
+    """)
+
+    # Upload de l'image
+    uploaded_file = st.file_uploader(
+        "Choisir une image de route",
+        type=['png', 'jpg', 'jpeg', 'bmp'],
+        help="Formats supportés: PNG, JPG, JPEG, BMP"
+    )
+
+    if uploaded_file is not None:
+        # Charger l'image
+        image = Image.open(uploaded_file)
+        image_np = np.array(image)
+
+        # Prétraiter l'image
+        image_resized, image_normalized = preprocess_image(image_np)
+
+        # Afficher l'image originale
+        st.subheader("Image Chargée")
+        col1, col2 = st.columns([2, 1])
+        with col1:
+            st.image(image_resized, caption=f"Image redimensionnée ({IMG_SIZE[0]}x{IMG_SIZE[1]})", use_container_width=True)
+        with col2:
+            st.info(f"""
+            **Informations:**
+            - Taille originale: {image_np.shape[1]}x{image_np.shape[0]}
+            - Taille traitée: {IMG_SIZE[0]}x{IMG_SIZE[1]}
+            - Canaux: {image_np.shape[2] if len(image_np.shape) > 2 else 1}
+            """)
+
+        st.divider()
+
+        # Bouton d'analyse
+        if st.button("Analyser l'image avec les 3 modèles", type="primary"):
+            st.subheader("Résultats de l'Analyse")
+
+            results = {}
+
+            # Créer 3 colonnes pour les résultats
+            col1, col2, col3 = st.columns(3)
+
+            # === U-NET ===
+            with col1:
+                st.markdown("### U-Net")
+                with st.spinner("Chargement de U-Net..."):
+                    unet_model, unet_trained = load_unet_model()
+
+                if unet_model is not None:
+                    status = "Entraîné" if unet_trained else "Non entraîné (poids aléatoires)"
+                    st.caption(f"Statut: {status}")
+
+                    with st.spinner("Analyse en cours..."):
+                        mask, confidence, inf_time = predict_unet(unet_model, image_normalized)
+
+                    results['U-Net'] = {
+                        'mask': mask,
+                        'confidence': confidence,
+                        'time': inf_time,
+                        'trained': unet_trained
+                    }
+
+                    # Afficher le masque
+                    overlay = overlay_mask_on_image(image_resized, mask)
+                    st.image(overlay, caption="Segmentation U-Net", use_container_width=True)
+
+                    # Masque seul
+                    colored_mask = mask_to_colored_image(mask)
+                    st.image(colored_mask, caption="Masque de segmentation", use_container_width=True)
+
+                    st.metric("Temps d'inférence", f"{inf_time*1000:.1f} ms")
+                else:
+                    st.error("U-Net non disponible")
+
+            # === YOLO ===
+            with col2:
+                st.markdown("### YOLO")
+                with st.spinner("Chargement de YOLO..."):
+                    yolo_model, yolo_trained = load_yolo_model()
+
+                if yolo_model is not None:
+                    status = "Entraîné sur RDD2022" if yolo_trained else "Pré-entraîné (COCO)"
+                    st.caption(f"Statut: {status}")
+
+                    with st.spinner("Analyse en cours..."):
+                        mask, confidence, inf_time = predict_yolo(yolo_model, image_resized)
+
+                    results['YOLO'] = {
+                        'mask': mask,
+                        'confidence': confidence,
+                        'time': inf_time,
+                        'trained': yolo_trained
+                    }
+
+                    # Afficher le masque
+                    overlay = overlay_mask_on_image(image_resized, mask)
+                    st.image(overlay, caption="Détection YOLO", use_container_width=True)
+
+                    # Masque seul
+                    colored_mask = mask_to_colored_image(mask)
+                    st.image(colored_mask, caption="Masque de détection", use_container_width=True)
+
+                    st.metric("Temps d'inférence", f"{inf_time*1000:.1f} ms")
+                else:
+                    st.error("YOLO non disponible")
+
+            # === HYBRIDE ===
+            with col3:
+                st.markdown("### Hybride")
+                with st.spinner("Chargement du modèle Hybride..."):
+                    hybrid_model, hybrid_trained = load_hybrid_model()
+
+                if hybrid_model is not None:
+                    status = "Entraîné" if hybrid_trained else "Non entraîné (poids aléatoires)"
+                    st.caption(f"Statut: {status}")
+
+                    with st.spinner("Analyse en cours..."):
+                        mask, confidence, inf_time = predict_hybrid(hybrid_model, image_normalized)
+
+                    results['Hybrid'] = {
+                        'mask': mask,
+                        'confidence': confidence,
+                        'time': inf_time,
+                        'trained': hybrid_trained
+                    }
+
+                    # Afficher le masque
+                    overlay = overlay_mask_on_image(image_resized, mask)
+                    st.image(overlay, caption="Segmentation Hybride", use_container_width=True)
+
+                    # Masque seul
+                    colored_mask = mask_to_colored_image(mask)
+                    st.image(colored_mask, caption="Masque de segmentation", use_container_width=True)
+
+                    st.metric("Temps d'inférence", f"{inf_time*1000:.1f} ms")
+                else:
+                    st.error("Modèle Hybride non disponible")
+
+            # === COMPARAISON DES PERFORMANCES ===
+            if results:
+                st.divider()
+                st.subheader("Comparaison des Performances")
+
+                # Tableau comparatif
+                comparison_data = []
+                for model_name, res in results.items():
+                    # Compter les pixels par classe
+                    unique, counts = np.unique(res['mask'], return_counts=True)
+                    class_counts = dict(zip(unique, counts))
+
+                    # Calculer le pourcentage de détection
+                    total_pixels = res['mask'].size
+                    detected_pixels = total_pixels - class_counts.get(0, 0)
+                    detection_rate = (detected_pixels / total_pixels) * 100
+
+                    comparison_data.append({
+                        'Modèle': model_name,
+                        'Temps (ms)': f"{res['time']*1000:.1f}",
+                        'Pixels détectés': f"{detected_pixels:,}",
+                        'Taux de détection': f"{detection_rate:.2f}%",
+                        'Confiance moyenne': f"{np.mean(res['confidence']):.3f}",
+                        'Entraîné': "Oui" if res['trained'] else "Non"
+                    })
+
+                df_comparison = pd.DataFrame(comparison_data)
+                st.dataframe(df_comparison, use_container_width=True, hide_index=True)
+
+                # Graphique comparatif des temps d'inférence
+                fig, ax = plt.subplots(figsize=(8, 4))
+                models = [d['Modèle'] for d in comparison_data]
+                times = [float(d['Temps (ms)']) for d in comparison_data]
+                colors = ['#2ecc71', '#e74c3c', '#3498db']
+
+                bars = ax.bar(models, times, color=colors[:len(models)])
+                ax.set_ylabel('Temps (ms)')
+                ax.set_title('Comparaison des Temps d\'Inférence')
+
+                for bar, t in zip(bars, times):
+                    ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.5,
+                           f'{t:.1f}', ha='center', va='bottom')
+
+                st.pyplot(fig)
+                plt.close()
+
+                # Légende des couleurs
+                st.subheader("Légende des Classes")
+                legend_cols = st.columns(5)
+                for idx, (class_id, class_name) in enumerate(CLASS_NAMES.items()):
+                    color = CLASS_COLORS[class_id]
+                    with legend_cols[idx]:
+                        color_box = f'<div style="background-color: rgb{color}; width: 30px; height: 30px; display: inline-block; border: 1px solid black;"></div>'
+                        st.markdown(f"{color_box} {class_name}", unsafe_allow_html=True)
 
 
 def display_preprocessing_results():
@@ -394,6 +817,10 @@ def display_final_comparison(averages):
     st.dataframe(df, use_container_width=True, hide_index=True)
 
 
+# =============================================================================
+# FONCTION PRINCIPALE
+# =============================================================================
+
 def main():
     """Fonction principale de l'application"""
 
@@ -409,43 +836,54 @@ def main():
     # Menu de navigation
     menu = st.sidebar.radio(
         "Navigation",
-        ["Prétraitement", "Histogrammes des Métriques", "Évolution de l'Entraînement",
-         "Métriques Détaillées", "Synthèse Finale"]
+        ["Analyse d'Image", "Prétraitement", "Histogrammes des Métriques",
+         "Évolution de l'Entraînement", "Métriques Détaillées", "Synthèse Finale"]
     )
 
     # Charger les métriques
     metrics = load_metrics()
 
-    if not metrics:
-        st.error("Aucune métrique trouvée. Vérifiez que les fichiers JSON sont présents dans results/logs/")
-        return
-
-    # Calculer les moyennes globales
-    averages = calculate_global_averages(metrics)
+    # Calculer les moyennes globales si des métriques sont disponibles
+    averages = calculate_global_averages(metrics) if metrics else {}
 
     # Afficher la section sélectionnée
-    if menu == "Prétraitement":
+    if menu == "Analyse d'Image":
+        display_image_analysis()
+
+    elif menu == "Prétraitement":
         display_preprocessing_results()
 
     elif menu == "Histogrammes des Métriques":
-        display_metrics_histograms(metrics, averages)
+        if metrics:
+            display_metrics_histograms(metrics, averages)
+        else:
+            st.error("Aucune métrique trouvée. Vérifiez que les fichiers JSON sont présents dans results/logs/")
 
     elif menu == "Évolution de l'Entraînement":
-        display_training_evolution(metrics)
+        if metrics:
+            display_training_evolution(metrics)
+        else:
+            st.error("Aucune métrique trouvée.")
 
     elif menu == "Métriques Détaillées":
-        display_detailed_metrics(metrics)
+        if metrics:
+            display_detailed_metrics(metrics)
+        else:
+            st.error("Aucune métrique trouvée.")
 
     elif menu == "Synthèse Finale":
-        display_final_comparison(averages)
+        if averages:
+            display_final_comparison(averages)
+        else:
+            st.error("Aucune métrique trouvée.")
 
     # Footer
     st.sidebar.divider()
     st.sidebar.markdown("""
     ### Types de dommages
-    - **Classe 0**: Fissures longitudinales
-    - **Classe 1**: Fissures transversales
-    - **Classe 2**: Fissures crocodiles
+    - **Classe 1**: Fissures longitudinales
+    - **Classe 2**: Fissures transversales
+    - **Classe 3**: Fissures crocodiles
     - **Classe 4**: Nids-de-poule
     """)
 
