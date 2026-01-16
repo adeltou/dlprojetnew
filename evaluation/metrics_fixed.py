@@ -27,7 +27,7 @@ def is_yolo_model(model) -> bool:
     return 'ultralytics' in model_type.lower() or 'yolo' in model_type.lower()
 
 
-def predict_with_yolo(model, batch_images: np.ndarray, target_size: Tuple[int, int] = (128, 128)) -> np.ndarray:
+def predict_with_yolo(model, batch_images: np.ndarray, target_size: Tuple[int, int] = (256, 256)) -> np.ndarray:
     """
     Effectue des prédictions avec un modèle YOLO et convertit au format attendu
     
@@ -156,7 +156,7 @@ def evaluate_model_on_dataset(model,
         # Prédiction selon le type de modèle
         if is_yolo:
             # YOLO: prédiction spéciale
-            batch_masks_pred = predict_with_yolo(model, batch_images, target_size=(128, 128))
+            batch_masks_pred = predict_with_yolo(model, batch_images, target_size=(256, 256))
         else:
             # Keras (U-Net, Hybrid): prédiction standard
             batch_predictions = model.predict(batch_images, verbose=False)
