@@ -64,6 +64,29 @@ CLASS_COLORS = {
 # FONCTIONS DE CHARGEMENT DES MODÈLES
 # =============================================================================
 
+def check_models_status():
+    """Vérifie le statut des modèles entraînés"""
+    status = {
+        'U-Net': {
+            'weights_path': MODELS_DIR / "unet_best.h5",
+            'trained': (MODELS_DIR / "unet_best.h5").exists(),
+            'metrics_available': UNET_METRICS.exists()
+        },
+        'YOLO': {
+            'weights_path': MODELS_DIR / "yolo_best.pt",
+            'trained': (MODELS_DIR / "yolo_best.pt").exists(),
+            'pretrained_available': (BASE_DIR / "yolov8n.pt").exists(),
+            'metrics_available': YOLO_METRICS.exists()
+        },
+        'Hybrid': {
+            'weights_path': MODELS_DIR / "hybrid_best.h5",
+            'trained': (MODELS_DIR / "hybrid_best.h5").exists(),
+            'metrics_available': HYBRID_METRICS.exists()
+        }
+    }
+    return status
+
+
 @st.cache_resource
 def load_unet_model():
     """Charge le modèle U-Net"""
@@ -74,14 +97,12 @@ def load_unet_model():
             num_classes=NUM_CLASSES,
             compile_model=False
         )
-        # Chercher les poids sauvegardés
         weights_path = MODELS_DIR / "unet_best.h5"
         if weights_path.exists():
             model.load_weights(str(weights_path))
             return model, True
         return model, False
     except Exception as e:
-        st.warning(f"Impossible de charger U-Net: {e}")
         return None, False
 
 
@@ -95,14 +116,12 @@ def load_hybrid_model():
             num_classes=NUM_CLASSES,
             compile_model=False
         )
-        # Chercher les poids sauvegardés
         weights_path = MODELS_DIR / "hybrid_best.h5"
         if weights_path.exists():
             model.load_weights(str(weights_path))
             return model, True
         return model, False
     except Exception as e:
-        st.warning(f"Impossible de charger Hybrid: {e}")
         return None, False
 
 
@@ -111,19 +130,16 @@ def load_yolo_model():
     """Charge le modèle YOLO"""
     try:
         from ultralytics import YOLO
-        # Chercher un modèle YOLO entraîné
         trained_path = MODELS_DIR / "yolo_best.pt"
         if trained_path.exists():
             model = YOLO(str(trained_path))
             return model, True
-        # Sinon charger le modèle pré-entraîné
         pretrained_path = BASE_DIR / "yolov8n.pt"
         if pretrained_path.exists():
             model = YOLO(str(pretrained_path))
             return model, False
         return None, False
     except Exception as e:
-        st.warning(f"Impossible de charger YOLO: {e}")
         return None, False
 
 
@@ -136,16 +152,12 @@ def preprocess_image(image, target_size=IMG_SIZE):
     if isinstance(image, Image.Image):
         image = np.array(image)
 
-    # Convertir en RGB si nécessaire
     if len(image.shape) == 2:
         image = cv2.cvtColor(image, cv2.COLOR_GRAY2RGB)
     elif image.shape[2] == 4:
         image = cv2.cvtColor(image, cv2.COLOR_RGBA2RGB)
 
-    # Redimensionner
     image_resized = cv2.resize(image, target_size)
-
-    # Normaliser
     image_normalized = image_resized.astype(np.float32) / 255.0
 
     return image_resized, image_normalized
@@ -153,35 +165,23 @@ def preprocess_image(image, target_size=IMG_SIZE):
 
 def predict_unet(model, image_normalized):
     """Effectue une prédiction avec U-Net"""
-    # Ajouter la dimension batch
     input_tensor = np.expand_dims(image_normalized, axis=0)
-
-    # Prédiction
     start_time = time.time()
     prediction = model.predict(input_tensor, verbose=0)
     inference_time = time.time() - start_time
-
-    # Récupérer le masque de segmentation
     mask = np.argmax(prediction[0], axis=-1)
     confidence = np.max(prediction[0], axis=-1)
-
     return mask, confidence, inference_time
 
 
 def predict_hybrid(model, image_normalized):
     """Effectue une prédiction avec le modèle Hybride"""
-    # Ajouter la dimension batch
     input_tensor = np.expand_dims(image_normalized, axis=0)
-
-    # Prédiction
     start_time = time.time()
     prediction = model.predict(input_tensor, verbose=0)
     inference_time = time.time() - start_time
-
-    # Récupérer le masque de segmentation
     mask = np.argmax(prediction[0], axis=-1)
     confidence = np.max(prediction[0], axis=-1)
-
     return mask, confidence, inference_time
 
 
@@ -191,7 +191,6 @@ def predict_yolo(model, image):
     results = model.predict(source=image, conf=0.25, verbose=False)
     inference_time = time.time() - start_time
 
-    # Convertir les détections en masque
     mask = np.zeros(IMG_SIZE, dtype=np.uint8)
     confidence_map = np.zeros(IMG_SIZE, dtype=np.float32)
 
@@ -206,8 +205,6 @@ def predict_yolo(model, image):
             for (x1, y1, x2, y2), cls, conf in zip(xyxyn, classes, confs):
                 px1, py1 = int(x1 * w), int(y1 * h)
                 px2, py2 = int(x2 * w), int(y2 * h)
-
-                # Mapper les classes (YOLO utilise 0-3, on ajoute 1 pour background)
                 mask_value = cls + 1 if cls < 4 else 4
                 mask[py1:py2, px1:px2] = mask_value
                 confidence_map[py1:py2, px1:px2] = conf
@@ -219,25 +216,18 @@ def mask_to_colored_image(mask):
     """Convertit un masque en image colorée"""
     h, w = mask.shape
     colored = np.zeros((h, w, 3), dtype=np.uint8)
-
     for class_id, color in CLASS_COLORS.items():
         colored[mask == class_id] = color
-
     return colored
 
 
 def overlay_mask_on_image(image, mask, alpha=0.5):
     """Superpose le masque coloré sur l'image originale"""
     colored_mask = mask_to_colored_image(mask)
-
-    # Créer l'overlay avec cv2.addWeighted sur l'image entière
     overlay = cv2.addWeighted(image, 1-alpha, colored_mask, alpha, 0)
-
-    # Garder l'image originale là où il n'y a pas de détection
     detection_mask = mask > 0
     result = image.copy()
     result[detection_mask] = overlay[detection_mask]
-
     return result
 
 
@@ -249,7 +239,6 @@ def load_metrics():
     """Charge les métriques des trois architectures"""
     metrics = {}
 
-    # U-Net
     if UNET_METRICS.exists():
         with open(UNET_METRICS, 'r') as f:
             unet_data = json.load(f)
@@ -265,7 +254,6 @@ def load_metrics():
                 'val_loss': [d['val_loss'] for d in unet_data]
             }
 
-    # YOLO
     if YOLO_METRICS.exists():
         with open(YOLO_METRICS, 'r') as f:
             yolo_data = json.load(f)
@@ -282,7 +270,6 @@ def load_metrics():
                 'val_loss': history['val_loss']
             }
 
-    # Hybrid
     if HYBRID_METRICS.exists():
         with open(HYBRID_METRICS, 'r') as f:
             hybrid_data = json.load(f)
@@ -304,7 +291,6 @@ def load_metrics():
 def calculate_global_averages(metrics):
     """Calcule les moyennes globales pour chaque métrique et architecture"""
     averages = {}
-
     metric_names = ['accuracy', 'dice_coefficient', 'iou', 'loss',
                     'val_accuracy', 'val_dice_coefficient', 'val_iou', 'val_loss']
 
@@ -317,6 +303,23 @@ def calculate_global_averages(metrics):
     return averages
 
 
+def get_best_metrics(metrics):
+    """Récupère les meilleures métriques pour chaque architecture"""
+    best = {}
+    for arch_name, arch_metrics in metrics.items():
+        best[arch_name] = {
+            'accuracy': max(arch_metrics['accuracy']),
+            'dice_coefficient': max(arch_metrics['dice_coefficient']),
+            'iou': max(arch_metrics['iou']),
+            'loss': min(arch_metrics['loss']),
+            'val_accuracy': max(arch_metrics['val_accuracy']),
+            'val_dice_coefficient': max(arch_metrics['val_dice_coefficient']),
+            'val_iou': max(arch_metrics['val_iou']),
+            'val_loss': min(arch_metrics['val_loss'])
+        }
+    return best
+
+
 # =============================================================================
 # SECTIONS DE L'INTERFACE
 # =============================================================================
@@ -325,14 +328,83 @@ def display_image_analysis():
     """Section d'analyse d'image avec les 3 modèles"""
     st.header("Analyse d'Image - Détection des Dommages Routiers")
 
+    # Vérifier le statut des modèles
+    status = check_models_status()
+    metrics = load_metrics()
+    best_metrics = get_best_metrics(metrics) if metrics else {}
+
+    # Afficher le statut des modèles
+    st.subheader("Statut des Modèles")
+
+    col1, col2, col3 = st.columns(3)
+
+    with col1:
+        st.markdown("**U-Net**")
+        if status['U-Net']['trained']:
+            st.success("Modèle entraîné disponible")
+        else:
+            st.warning("Non entraîné (poids aléatoires)")
+        if status['U-Net']['metrics_available'] and 'U-Net' in best_metrics:
+            st.caption(f"Meilleur IoU: {best_metrics['U-Net']['val_iou']:.4f}")
+            st.caption(f"Meilleur Dice: {best_metrics['U-Net']['val_dice_coefficient']:.4f}")
+
+    with col2:
+        st.markdown("**YOLO**")
+        if status['YOLO']['trained']:
+            st.success("Modèle entraîné disponible")
+        elif status['YOLO']['pretrained_available']:
+            st.info("Pré-entraîné COCO (non spécifique)")
+        else:
+            st.error("Non disponible")
+        if status['YOLO']['metrics_available'] and 'YOLO' in best_metrics:
+            st.caption(f"Meilleur IoU: {best_metrics['YOLO']['val_iou']:.4f}")
+            st.caption(f"Meilleur Dice: {best_metrics['YOLO']['val_dice_coefficient']:.4f}")
+
+    with col3:
+        st.markdown("**Hybride**")
+        if status['Hybrid']['trained']:
+            st.success("Modèle entraîné disponible")
+        else:
+            st.warning("Non entraîné (poids aléatoires)")
+        if status['Hybrid']['metrics_available'] and 'Hybrid' in best_metrics:
+            st.caption(f"Meilleur IoU: {best_metrics['Hybrid']['val_iou']:.4f}")
+            st.caption(f"Meilleur Dice: {best_metrics['Hybrid']['val_dice_coefficient']:.4f}")
+
+    st.divider()
+
+    # Afficher comparaison des performances d'entraînement
+    if metrics:
+        st.subheader("Comparaison des Performances (Entraînement)")
+
+        # Graphique des meilleures métriques
+        fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+        architectures = list(best_metrics.keys())
+        colors = {'U-Net': '#2ecc71', 'YOLO': '#e74c3c', 'Hybrid': '#3498db'}
+
+        metrics_to_show = [('val_accuracy', 'Accuracy (Val)'), ('val_dice_coefficient', 'Dice (Val)'), ('val_iou', 'IoU (Val)')]
+
+        for idx, (metric_key, metric_name) in enumerate(metrics_to_show):
+            ax = axes[idx]
+            values = [best_metrics[arch][metric_key] for arch in architectures]
+            bars = ax.bar(architectures, values, color=[colors[arch] for arch in architectures])
+            ax.set_title(f'Meilleur {metric_name}', fontsize=12, fontweight='bold')
+            ax.set_ylabel('Valeur')
+            ax.set_ylim(0, 1)
+            for bar, val in zip(bars, values):
+                ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.02,
+                       f'{val:.3f}', ha='center', va='bottom', fontsize=10)
+
+        plt.tight_layout()
+        st.pyplot(fig)
+        plt.close()
+
+    st.divider()
+
     st.markdown("""
-    Chargez une photo de route pour analyser les dommages avec nos 3 architectures de deep learning:
-    - **U-Net**: Architecture de segmentation sémantique
-    - **YOLO**: Détection d'objets (bounding boxes converties en masque)
-    - **Hybride**: Combinaison U-Net + YOLO avec attention gates
+    ### Charger une image pour l'analyse
+    Chargez une photo de route pour analyser les dommages avec les 3 architectures.
     """)
 
-    # Upload de l'image
     uploaded_file = st.file_uploader(
         "Choisir une image de route",
         type=['png', 'jpg', 'jpeg', 'bmp'],
@@ -340,187 +412,149 @@ def display_image_analysis():
     )
 
     if uploaded_file is not None:
-        # Charger l'image
         image = Image.open(uploaded_file)
         image_np = np.array(image)
-
-        # Prétraiter l'image
         image_resized, image_normalized = preprocess_image(image_np)
 
-        # Afficher l'image originale
         st.subheader("Image Chargée")
         col1, col2 = st.columns([2, 1])
         with col1:
-            st.image(image_resized, caption=f"Image redimensionnée ({IMG_SIZE[0]}x{IMG_SIZE[1]})", use_container_width=True)
+            st.image(image_resized, caption=f"Image ({IMG_SIZE[0]}x{IMG_SIZE[1]})", use_container_width=True)
         with col2:
             st.info(f"""
             **Informations:**
             - Taille originale: {image_np.shape[1]}x{image_np.shape[0]}
             - Taille traitée: {IMG_SIZE[0]}x{IMG_SIZE[1]}
-            - Canaux: {image_np.shape[2] if len(image_np.shape) > 2 else 1}
             """)
 
         st.divider()
 
-        # Bouton d'analyse
         if st.button("Analyser l'image avec les 3 modèles", type="primary"):
             st.subheader("Résultats de l'Analyse")
 
             results = {}
-
-            # Créer 3 colonnes pour les résultats
             col1, col2, col3 = st.columns(3)
 
             # === U-NET ===
             with col1:
                 st.markdown("### U-Net")
-                with st.spinner("Chargement de U-Net..."):
+                with st.spinner("Chargement..."):
                     unet_model, unet_trained = load_unet_model()
 
                 if unet_model is not None:
-                    status = "Entraîné" if unet_trained else "Non entraîné (poids aléatoires)"
-                    st.caption(f"Statut: {status}")
+                    if unet_trained:
+                        st.success("Modèle entraîné")
+                    else:
+                        st.warning("Poids aléatoires")
 
-                    with st.spinner("Analyse en cours..."):
+                    with st.spinner("Analyse..."):
                         mask, confidence, inf_time = predict_unet(unet_model, image_normalized)
 
-                    results['U-Net'] = {
-                        'mask': mask,
-                        'confidence': confidence,
-                        'time': inf_time,
-                        'trained': unet_trained
-                    }
+                    results['U-Net'] = {'mask': mask, 'confidence': confidence, 'time': inf_time, 'trained': unet_trained}
 
-                    # Afficher le masque
                     overlay = overlay_mask_on_image(image_resized, mask)
                     st.image(overlay, caption="Segmentation U-Net", use_container_width=True)
-
-                    # Masque seul
                     colored_mask = mask_to_colored_image(mask)
-                    st.image(colored_mask, caption="Masque de segmentation", use_container_width=True)
-
-                    st.metric("Temps d'inférence", f"{inf_time*1000:.1f} ms")
+                    st.image(colored_mask, caption="Masque", use_container_width=True)
+                    st.metric("Temps", f"{inf_time*1000:.1f} ms")
                 else:
-                    st.error("U-Net non disponible")
+                    st.error("Non disponible")
 
             # === YOLO ===
             with col2:
                 st.markdown("### YOLO")
-                with st.spinner("Chargement de YOLO..."):
+                with st.spinner("Chargement..."):
                     yolo_model, yolo_trained = load_yolo_model()
 
                 if yolo_model is not None:
-                    status = "Entraîné sur RDD2022" if yolo_trained else "Pré-entraîné (COCO)"
-                    st.caption(f"Statut: {status}")
+                    if yolo_trained:
+                        st.success("Modèle entraîné RDD2022")
+                    else:
+                        st.info("Pré-entraîné COCO")
 
-                    with st.spinner("Analyse en cours..."):
+                    with st.spinner("Analyse..."):
                         mask, confidence, inf_time = predict_yolo(yolo_model, image_resized)
 
-                    results['YOLO'] = {
-                        'mask': mask,
-                        'confidence': confidence,
-                        'time': inf_time,
-                        'trained': yolo_trained
-                    }
+                    results['YOLO'] = {'mask': mask, 'confidence': confidence, 'time': inf_time, 'trained': yolo_trained}
 
-                    # Afficher le masque
                     overlay = overlay_mask_on_image(image_resized, mask)
                     st.image(overlay, caption="Détection YOLO", use_container_width=True)
-
-                    # Masque seul
                     colored_mask = mask_to_colored_image(mask)
-                    st.image(colored_mask, caption="Masque de détection", use_container_width=True)
-
-                    st.metric("Temps d'inférence", f"{inf_time*1000:.1f} ms")
+                    st.image(colored_mask, caption="Masque", use_container_width=True)
+                    st.metric("Temps", f"{inf_time*1000:.1f} ms")
                 else:
-                    st.error("YOLO non disponible")
+                    st.error("Non disponible")
 
             # === HYBRIDE ===
             with col3:
                 st.markdown("### Hybride")
-                with st.spinner("Chargement du modèle Hybride..."):
+                with st.spinner("Chargement..."):
                     hybrid_model, hybrid_trained = load_hybrid_model()
 
                 if hybrid_model is not None:
-                    status = "Entraîné" if hybrid_trained else "Non entraîné (poids aléatoires)"
-                    st.caption(f"Statut: {status}")
+                    if hybrid_trained:
+                        st.success("Modèle entraîné")
+                    else:
+                        st.warning("Poids aléatoires")
 
-                    with st.spinner("Analyse en cours..."):
+                    with st.spinner("Analyse..."):
                         mask, confidence, inf_time = predict_hybrid(hybrid_model, image_normalized)
 
-                    results['Hybrid'] = {
-                        'mask': mask,
-                        'confidence': confidence,
-                        'time': inf_time,
-                        'trained': hybrid_trained
-                    }
+                    results['Hybrid'] = {'mask': mask, 'confidence': confidence, 'time': inf_time, 'trained': hybrid_trained}
 
-                    # Afficher le masque
                     overlay = overlay_mask_on_image(image_resized, mask)
                     st.image(overlay, caption="Segmentation Hybride", use_container_width=True)
-
-                    # Masque seul
                     colored_mask = mask_to_colored_image(mask)
-                    st.image(colored_mask, caption="Masque de segmentation", use_container_width=True)
-
-                    st.metric("Temps d'inférence", f"{inf_time*1000:.1f} ms")
+                    st.image(colored_mask, caption="Masque", use_container_width=True)
+                    st.metric("Temps", f"{inf_time*1000:.1f} ms")
                 else:
-                    st.error("Modèle Hybride non disponible")
+                    st.error("Non disponible")
 
-            # === COMPARAISON DES PERFORMANCES ===
+            # === COMPARAISON ===
             if results:
                 st.divider()
-                st.subheader("Comparaison des Performances")
+                st.subheader("Comparaison des Résultats")
 
-                # Tableau comparatif
                 comparison_data = []
                 for model_name, res in results.items():
-                    # Compter les pixels par classe
                     unique, counts = np.unique(res['mask'], return_counts=True)
                     class_counts = dict(zip(unique, counts))
-
-                    # Calculer le pourcentage de détection
                     total_pixels = res['mask'].size
                     detected_pixels = total_pixels - class_counts.get(0, 0)
                     detection_rate = (detected_pixels / total_pixels) * 100
+
+                    # Classes détectées
+                    detected_classes = [CLASS_NAMES[c] for c in unique if c > 0]
 
                     comparison_data.append({
                         'Modèle': model_name,
                         'Temps (ms)': f"{res['time']*1000:.1f}",
                         'Pixels détectés': f"{detected_pixels:,}",
-                        'Taux de détection': f"{detection_rate:.2f}%",
-                        'Confiance moyenne': f"{np.mean(res['confidence']):.3f}",
+                        'Taux détection': f"{detection_rate:.2f}%",
+                        'Classes détectées': ', '.join(detected_classes) if detected_classes else 'Aucune',
                         'Entraîné': "Oui" if res['trained'] else "Non"
                     })
 
-                df_comparison = pd.DataFrame(comparison_data)
-                st.dataframe(df_comparison, use_container_width=True, hide_index=True)
+                df = pd.DataFrame(comparison_data)
+                st.dataframe(df, use_container_width=True, hide_index=True)
 
-                # Graphique comparatif des temps d'inférence
-                fig, ax = plt.subplots(figsize=(8, 4))
-                models = [d['Modèle'] for d in comparison_data]
-                times = [float(d['Temps (ms)']) for d in comparison_data]
-                colors = ['#2ecc71', '#e74c3c', '#3498db']
-
-                bars = ax.bar(models, times, color=colors[:len(models)])
-                ax.set_ylabel('Temps (ms)')
-                ax.set_title('Comparaison des Temps d\'Inférence')
-
-                for bar, t in zip(bars, times):
-                    ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.5,
-                           f'{t:.1f}', ha='center', va='bottom')
-
-                st.pyplot(fig)
-                plt.close()
-
-                # Légende des couleurs
+                # Légende
                 st.subheader("Légende des Classes")
                 legend_cols = st.columns(5)
                 for idx, (class_id, class_name) in enumerate(CLASS_NAMES.items()):
                     color = CLASS_COLORS[class_id]
                     with legend_cols[idx]:
-                        color_box = f'<div style="background-color: rgb{color}; width: 30px; height: 30px; display: inline-block; border: 1px solid black;"></div>'
+                        color_box = f'<div style="background-color: rgb{color}; width: 30px; height: 30px; display: inline-block; border: 1px solid black; vertical-align: middle;"></div>'
                         st.markdown(f"{color_box} {class_name}", unsafe_allow_html=True)
+
+                # Note importante
+                st.info("""
+                **Note:** Pour de meilleurs résultats, les modèles doivent être entraînés sur le dataset RDD2022.
+                Les fichiers de poids doivent être placés dans `results/models/`:
+                - `unet_best.h5` pour U-Net
+                - `yolo_best.pt` pour YOLO
+                - `hybrid_best.h5` pour Hybride
+                """)
 
 
 def display_preprocessing_results():
@@ -532,9 +566,7 @@ def display_preprocessing_results():
     du dataset RDD2022 (Road Damage Detection).
     """)
 
-    # Distribution des classes
     st.subheader("Distribution des Classes")
-
     col1, col2, col3 = st.columns(3)
 
     train_dist = FIGURES_DIR / "class_distribution_train.png"
@@ -543,40 +575,38 @@ def display_preprocessing_results():
 
     with col1:
         if train_dist.exists():
-            st.image(str(train_dist), caption="Distribution - Ensemble d'entraînement", use_container_width=True)
+            st.image(str(train_dist), caption="Ensemble d'entraînement", use_container_width=True)
         else:
             st.warning("Image non disponible")
 
     with col2:
         if val_dist.exists():
-            st.image(str(val_dist), caption="Distribution - Ensemble de validation", use_container_width=True)
+            st.image(str(val_dist), caption="Ensemble de validation", use_container_width=True)
         else:
             st.warning("Image non disponible")
 
     with col3:
         if test_dist.exists():
-            st.image(str(test_dist), caption="Distribution - Ensemble de test", use_container_width=True)
+            st.image(str(test_dist), caption="Ensemble de test", use_container_width=True)
         else:
             st.warning("Image non disponible")
 
-    # Augmentation et échantillons
-    st.subheader("Augmentation des Données et Échantillons")
-
+    st.subheader("Augmentation des Données")
     col1, col2 = st.columns(2)
 
     with col1:
         augmentation_img = FIGURES_DIR / "test_augmentation.png"
         if augmentation_img.exists():
-            st.image(str(augmentation_img), caption="Exemples d'augmentation de données", use_container_width=True)
+            st.image(str(augmentation_img), caption="Exemples d'augmentation", use_container_width=True)
         else:
-            st.warning("Image d'augmentation non disponible")
+            st.warning("Image non disponible")
 
     with col2:
         sample_img = FIGURES_DIR / "test_sample_original.png"
         if sample_img.exists():
             st.image(str(sample_img), caption="Échantillon original", use_container_width=True)
         else:
-            st.warning("Image d'échantillon non disponible")
+            st.warning("Image non disponible")
 
 
 def display_metrics_histograms(metrics, averages):
@@ -586,14 +616,11 @@ def display_metrics_histograms(metrics, averages):
     architectures = list(averages.keys())
     colors = {'U-Net': '#2ecc71', 'YOLO': '#e74c3c', 'Hybrid': '#3498db'}
 
-    # Métriques principales pour l'histogramme de comparaison
     main_metrics = ['accuracy', 'dice_coefficient', 'iou']
     val_metrics = ['val_accuracy', 'val_dice_coefficient', 'val_iou']
 
-    # Tableau récapitulatif des moyennes globales
-    st.subheader("Moyennes Globales des Métriques")
+    st.subheader("Moyennes Globales des Métriques (sur toutes les époques)")
 
-    # Créer un DataFrame pour l'affichage
     df_data = []
     for arch in architectures:
         row = {'Architecture': arch}
@@ -605,9 +632,7 @@ def display_metrics_histograms(metrics, averages):
     df = pd.DataFrame(df_data)
     st.dataframe(df, use_container_width=True, hide_index=True)
 
-    # Histogrammes des métriques d'entraînement
     st.subheader("Métriques d'Entraînement (Moyennes)")
-
     fig, axes = plt.subplots(1, 3, figsize=(15, 5))
 
     for idx, metric in enumerate(main_metrics):
@@ -617,8 +642,6 @@ def display_metrics_histograms(metrics, averages):
         ax.set_title(metric.replace('_', ' ').title(), fontsize=12, fontweight='bold')
         ax.set_ylabel('Valeur')
         ax.set_ylim(0, 1)
-
-        # Ajouter les valeurs sur les barres
         for bar, val in zip(bars, values):
             ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.02,
                    f'{val:.3f}', ha='center', va='bottom', fontsize=10)
@@ -627,9 +650,7 @@ def display_metrics_histograms(metrics, averages):
     st.pyplot(fig)
     plt.close()
 
-    # Histogrammes des métriques de validation
     st.subheader("Métriques de Validation (Moyennes)")
-
     fig, axes = plt.subplots(1, 3, figsize=(15, 5))
 
     for idx, metric in enumerate(val_metrics):
@@ -640,8 +661,6 @@ def display_metrics_histograms(metrics, averages):
                     fontsize=12, fontweight='bold')
         ax.set_ylabel('Valeur')
         ax.set_ylim(0, 1)
-
-        # Ajouter les valeurs sur les barres
         for bar, val in zip(bars, values):
             ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.02,
                    f'{val:.3f}', ha='center', va='bottom', fontsize=10)
@@ -650,29 +669,25 @@ def display_metrics_histograms(metrics, averages):
     st.pyplot(fig)
     plt.close()
 
-    # Comparaison des pertes (Loss)
     st.subheader("Comparaison des Pertes (Loss)")
-
     fig, axes = plt.subplots(1, 2, figsize=(12, 5))
 
-    # Loss d'entraînement
     ax = axes[0]
     values = [averages[arch]['loss'] for arch in architectures]
     bars = ax.bar(architectures, values, color=[colors[arch] for arch in architectures])
-    ax.set_title('Loss Entraînement (Moyenne)', fontsize=12, fontweight='bold')
+    ax.set_title('Loss Entraînement', fontsize=12, fontweight='bold')
     ax.set_ylabel('Valeur')
     for bar, val in zip(bars, values):
-        ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.1,
+        ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.02,
                f'{val:.3f}', ha='center', va='bottom', fontsize=10)
 
-    # Loss de validation
     ax = axes[1]
     values = [averages[arch]['val_loss'] for arch in architectures]
     bars = ax.bar(architectures, values, color=[colors[arch] for arch in architectures])
-    ax.set_title('Loss Validation (Moyenne)', fontsize=12, fontweight='bold')
+    ax.set_title('Loss Validation', fontsize=12, fontweight='bold')
     ax.set_ylabel('Valeur')
     for bar, val in zip(bars, values):
-        ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.1,
+        ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.02,
                f'{val:.3f}', ha='center', va='bottom', fontsize=10)
 
     plt.tight_layout()
@@ -687,7 +702,6 @@ def display_training_evolution(metrics):
     architectures = list(metrics.keys())
     colors = {'U-Net': '#2ecc71', 'YOLO': '#e74c3c', 'Hybrid': '#3498db'}
 
-    # Sélection de la métrique à visualiser
     metric_options = {
         'Accuracy': 'accuracy',
         'Dice Coefficient': 'dice_coefficient',
@@ -730,7 +744,6 @@ def display_detailed_metrics(metrics):
     if architecture in metrics:
         arch_metrics = metrics[architecture]
 
-        # Créer un DataFrame avec toutes les métriques
         df_data = {
             'Époque': arch_metrics['epochs'],
             'Accuracy': [f"{v:.4f}" for v in arch_metrics['accuracy']],
@@ -752,8 +765,8 @@ def display_final_comparison(averages):
     st.header("Synthèse et Comparaison Finale")
 
     architectures = list(averages.keys())
+    colors = {'U-Net': '#2ecc71', 'YOLO': '#e74c3c', 'Hybrid': '#3498db'}
 
-    # Radar chart pour comparer les architectures
     st.subheader("Comparaison Radar des Performances")
 
     metrics_to_compare = ['accuracy', 'dice_coefficient', 'iou',
@@ -763,13 +776,11 @@ def display_final_comparison(averages):
     fig, ax = plt.subplots(figsize=(10, 10), subplot_kw=dict(projection='polar'))
 
     angles = np.linspace(0, 2*np.pi, len(labels), endpoint=False).tolist()
-    angles += angles[:1]  # Fermer le polygone
-
-    colors = {'U-Net': '#2ecc71', 'YOLO': '#e74c3c', 'Hybrid': '#3498db'}
+    angles += angles[:1]
 
     for arch in architectures:
         values = [averages[arch][m] for m in metrics_to_compare]
-        values += values[:1]  # Fermer le polygone
+        values += values[:1]
         ax.plot(angles, values, 'o-', linewidth=2, label=arch, color=colors[arch])
         ax.fill(angles, values, alpha=0.25, color=colors[arch])
 
@@ -783,7 +794,6 @@ def display_final_comparison(averages):
     st.pyplot(fig)
     plt.close()
 
-    # Meilleure architecture par métrique
     st.subheader("Meilleure Architecture par Métrique")
 
     best_results = []
@@ -796,11 +806,11 @@ def display_final_comparison(averages):
             if best_val is None:
                 best_val = val
                 best_arch = arch
-            elif 'loss' in metric:  # Pour loss, on veut le minimum
+            elif 'loss' in metric:
                 if val < best_val:
                     best_val = val
                     best_arch = arch
-            else:  # Pour les autres métriques, on veut le maximum
+            else:
                 if val > best_val:
                     best_val = val
                     best_arch = arch
@@ -822,7 +832,6 @@ def display_final_comparison(averages):
 def main():
     """Fonction principale de l'application"""
 
-    # Titre principal
     st.title("Projet Deep Learning - Détection des Dommages Routiers")
     st.markdown("""
     **Master 2 HPC - Année 2025-2026**
@@ -831,20 +840,15 @@ def main():
 
     st.divider()
 
-    # Menu de navigation
     menu = st.sidebar.radio(
         "Navigation",
         ["Analyse d'Image", "Prétraitement", "Histogrammes des Métriques",
          "Évolution de l'Entraînement", "Métriques Détaillées", "Synthèse Finale"]
     )
 
-    # Charger les métriques
     metrics = load_metrics()
-
-    # Calculer les moyennes globales si des métriques sont disponibles
     averages = calculate_global_averages(metrics) if metrics else {}
 
-    # Afficher la section sélectionnée
     if menu == "Analyse d'Image":
         display_image_analysis()
 
@@ -855,7 +859,7 @@ def main():
         if metrics:
             display_metrics_histograms(metrics, averages)
         else:
-            st.error("Aucune métrique trouvée. Vérifiez que les fichiers JSON sont présents dans results/logs/")
+            st.error("Aucune métrique trouvée.")
 
     elif menu == "Évolution de l'Entraînement":
         if metrics:
@@ -875,7 +879,6 @@ def main():
         else:
             st.error("Aucune métrique trouvée.")
 
-    # Footer
     st.sidebar.divider()
     st.sidebar.markdown("""
     ### Types de dommages
