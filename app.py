@@ -2,6 +2,12 @@
 Interface Streamlit pour le projet de Deep Learning
 Détection et Segmentation des Dommages Routiers
 Master 2 HPC - 2025-2026
+
+Version améliorée avec:
+- Correction des incohérences de classes
+- Support du modèle de segmentation YOLO
+- Post-traitement des masques
+- Meilleure visualisation
 """
 
 import streamlit as st
@@ -15,6 +21,7 @@ from pathlib import Path
 from PIL import Image
 import cv2
 import time
+from scipy import ndimage
 
 # Configuration de la page
 st.set_page_config(
@@ -29,6 +36,9 @@ FIGURES_DIR = BASE_DIR / "results" / "figures"
 LOGS_DIR = BASE_DIR / "results" / "logs"
 MODELS_DIR = BASE_DIR / "results" / "models"
 
+# Créer le dossier models s'il n'existe pas
+MODELS_DIR.mkdir(parents=True, exist_ok=True)
+
 # Ajouter le répertoire racine au path
 sys.path.insert(0, str(BASE_DIR))
 
@@ -37,26 +47,39 @@ UNET_METRICS = LOGS_DIR / "unet_100img_20260109_232107_metrics.json"
 YOLO_METRICS = LOGS_DIR / "yolo_training_results.json"
 HYBRID_METRICS = LOGS_DIR / "hybrid_100img_20260110_231216_metrics.json"
 
-# Configuration
+# Configuration - CORRIGÉE pour cohérence avec le dataset RDD2022
 IMG_SIZE = (256, 256)
-NUM_CLASSES = 5  # 4 classes + background
+# Le dataset RDD2022 utilise les classes 0, 1, 2, 4 (sans la classe 3)
+# Pour la segmentation, on ajoute le background comme classe 0
+# Donc on remape: background=0, D00=1, D10=2, D20=3, D40=4
+NUM_CLASSES = 5  # 4 types de dommages + 1 background
 
-# Classes de dommages
+# Classes de dommages - CORRIGÉES
+# Mapping: 0=Background, 1=D00(Longitudinale), 2=D10(Transversale), 3=D20(Crocodile), 4=D40(Nid-de-poule)
 CLASS_NAMES = {
     0: "Background",
-    1: "Fissure longitudinale",
-    2: "Fissure transversale",
-    3: "Fissure crocodile",
-    4: "Nid-de-poule"
+    1: "Fissure longitudinale (D00)",
+    2: "Fissure transversale (D10)",
+    3: "Fissure crocodile (D20)",
+    4: "Nid-de-poule (D40)"
 }
 
-# Couleurs pour la visualisation (RGB)
+# Couleurs pour la visualisation (RGB) - Plus distinctives
 CLASS_COLORS = {
     0: (0, 0, 0),         # Noir pour background
-    1: (255, 0, 0),       # Rouge pour longitudinale
-    2: (0, 255, 0),       # Vert pour transversale
-    3: (0, 0, 255),       # Bleu pour crocodile
-    4: (255, 255, 0)      # Jaune pour nid-de-poule
+    1: (255, 50, 50),     # Rouge vif pour longitudinale
+    2: (50, 255, 50),     # Vert vif pour transversale
+    3: (50, 50, 255),     # Bleu vif pour crocodile
+    4: (255, 255, 50)     # Jaune vif pour nid-de-poule
+}
+
+# Couleurs alternatives plus visibles pour l'overlay
+CLASS_COLORS_OVERLAY = {
+    0: (0, 0, 0),
+    1: (255, 0, 0),       # Rouge pur
+    2: (0, 255, 0),       # Vert pur
+    3: (0, 100, 255),     # Bleu-cyan
+    4: (255, 200, 0)      # Orange-jaune
 }
 
 
@@ -108,23 +131,32 @@ def load_hybrid_model():
 
 @st.cache_resource
 def load_yolo_model():
-    """Charge le modèle YOLO"""
+    """Charge le modèle YOLO - Préférence pour le modèle de segmentation"""
     try:
         from ultralytics import YOLO
-        # Chercher un modèle YOLO entraîné
+
+        # Priorité 1: Modèle YOLO entraîné sur RDD2022
         trained_path = MODELS_DIR / "yolo_best.pt"
         if trained_path.exists():
             model = YOLO(str(trained_path))
-            return model, True
-        # Sinon charger le modèle pré-entraîné
+            return model, True, "trained"
+
+        # Priorité 2: Modèle de segmentation pré-entraîné (meilleur pour les masques)
+        seg_path = BASE_DIR / "yolov8n-seg.pt"
+        if seg_path.exists():
+            model = YOLO(str(seg_path))
+            return model, False, "segmentation"
+
+        # Priorité 3: Modèle de détection pré-entraîné
         pretrained_path = BASE_DIR / "yolov8n.pt"
         if pretrained_path.exists():
             model = YOLO(str(pretrained_path))
-            return model, False
-        return None, False
+            return model, False, "detection"
+
+        return None, False, None
     except Exception as e:
         st.warning(f"Impossible de charger YOLO: {e}")
-        return None, False
+        return None, False, None
 
 
 # =============================================================================
@@ -185,18 +217,55 @@ def predict_hybrid(model, image_normalized):
     return mask, confidence, inference_time
 
 
-def predict_yolo(model, image):
-    """Effectue une prédiction avec YOLO"""
+def predict_yolo(model, image, model_type="detection"):
+    """
+    Effectue une prédiction avec YOLO
+
+    Args:
+        model: Modèle YOLO
+        image: Image à analyser
+        model_type: "segmentation", "detection" ou "trained"
+    """
     start_time = time.time()
+
+    # Prédiction avec YOLO
     results = model.predict(source=image, conf=0.25, verbose=False)
     inference_time = time.time() - start_time
 
-    # Convertir les détections en masque
+    # Initialiser le masque et la carte de confiance
     mask = np.zeros(IMG_SIZE, dtype=np.uint8)
     confidence_map = np.zeros(IMG_SIZE, dtype=np.float32)
 
     for result in results:
-        if result.boxes is not None and len(result.boxes) > 0:
+        # Vérifier si c'est un modèle de segmentation avec des masques
+        if hasattr(result, 'masks') and result.masks is not None:
+            # Modèle de segmentation - extraire les masques
+            masks_data = result.masks.data.cpu().numpy()
+            if result.boxes is not None:
+                classes = result.boxes.cls.cpu().numpy().astype(int)
+                confs = result.boxes.conf.cpu().numpy()
+
+                for i, (seg_mask, cls, conf) in enumerate(zip(masks_data, classes, confs)):
+                    # Redimensionner le masque à la taille cible
+                    seg_mask_resized = cv2.resize(seg_mask, IMG_SIZE, interpolation=cv2.INTER_NEAREST)
+
+                    # Pour les modèles pré-entraînés COCO, on simule la détection de dommages
+                    # En production, utiliser un modèle entraîné sur RDD2022
+                    if model_type in ["segmentation", "detection"]:
+                        # Simulation: mapper certaines classes COCO à des dommages
+                        # Ceci est temporaire - idéalement utiliser un modèle entraîné
+                        damage_class = simulate_damage_class_from_coco(cls, seg_mask_resized)
+                    else:
+                        # Modèle entraîné: utiliser le mapping direct
+                        damage_class = cls + 1 if cls < 4 else 4
+
+                    # Appliquer le masque là où la valeur est > 0.5
+                    mask_binary = seg_mask_resized > 0.5
+                    mask[mask_binary] = damage_class
+                    confidence_map[mask_binary] = conf
+
+        # Si pas de masques, utiliser les bounding boxes
+        elif result.boxes is not None and len(result.boxes) > 0:
             boxes = result.boxes
             xyxyn = boxes.xyxyn.cpu().numpy()
             classes = boxes.cls.cpu().numpy().astype(int)
@@ -207,30 +276,80 @@ def predict_yolo(model, image):
                 px1, py1 = int(x1 * w), int(y1 * h)
                 px2, py2 = int(x2 * w), int(y2 * h)
 
-                # Mapper les classes (YOLO utilise 0-3, on ajoute 1 pour background)
-                mask_value = cls + 1 if cls < 4 else 4
-                mask[py1:py2, px1:px2] = mask_value
-                confidence_map[py1:py2, px1:px2] = conf
+                # Assurer que les coordonnées sont valides
+                px1, py1 = max(0, px1), max(0, py1)
+                px2, py2 = min(w, px2), min(h, py2)
+
+                if model_type in ["segmentation", "detection"]:
+                    # Modèle pré-entraîné: simulation
+                    damage_class = (cls % 4) + 1  # Classes 1-4
+                else:
+                    # Modèle entraîné: mapping direct
+                    damage_class = cls + 1 if cls < 4 else 4
+
+                # Créer un masque elliptique au lieu d'un rectangle
+                # pour un résultat plus réaliste
+                center_x = (px1 + px2) // 2
+                center_y = (py1 + py2) // 2
+                axis_x = (px2 - px1) // 2
+                axis_y = (py2 - py1) // 2
+
+                if axis_x > 0 and axis_y > 0:
+                    cv2.ellipse(mask, (center_x, center_y), (axis_x, axis_y),
+                               0, 0, 360, int(damage_class), -1)
+                    cv2.ellipse(confidence_map, (center_x, center_y), (axis_x, axis_y),
+                               0, 0, 360, conf, -1)
 
     return mask, confidence_map, inference_time
 
 
-def mask_to_colored_image(mask):
+def simulate_damage_class_from_coco(coco_class, mask):
+    """
+    Simule une classe de dommage à partir d'une détection COCO
+    Note: Cette fonction est utilisée uniquement pour la démonstration
+    avec des modèles pré-entraînés non entraînés sur RDD2022
+    """
+    # Mapping basé sur les caractéristiques de forme du masque
+    if mask is not None and np.any(mask > 0):
+        # Calculer le ratio largeur/hauteur
+        coords = np.where(mask > 0)
+        if len(coords[0]) > 0:
+            height = coords[0].max() - coords[0].min() + 1
+            width = coords[1].max() - coords[1].min() + 1
+            aspect_ratio = width / max(height, 1)
+
+            # Classification basée sur la forme
+            if aspect_ratio > 3:
+                return 1  # Fissure longitudinale (allongée horizontalement)
+            elif aspect_ratio < 0.3:
+                return 2  # Fissure transversale (allongée verticalement)
+            elif np.sum(mask > 0) > 1000:
+                return 4  # Nid-de-poule (grande surface)
+            else:
+                return 3  # Fissure crocodile (forme complexe)
+
+    # Par défaut, rotation entre les classes
+    return (coco_class % 4) + 1
+
+
+def mask_to_colored_image(mask, use_overlay_colors=False):
     """Convertit un masque en image colorée"""
     h, w = mask.shape
     colored = np.zeros((h, w, 3), dtype=np.uint8)
 
-    for class_id, color in CLASS_COLORS.items():
+    colors = CLASS_COLORS_OVERLAY if use_overlay_colors else CLASS_COLORS
+
+    for class_id, color in colors.items():
         colored[mask == class_id] = color
 
     return colored
 
 
-def overlay_mask_on_image(image, mask, alpha=0.5):
-    """Superpose le masque coloré sur l'image originale"""
-    colored_mask = mask_to_colored_image(mask)
+def overlay_mask_on_image(image, mask, alpha=0.6):
+    """Superpose le masque coloré sur l'image originale avec meilleure visibilité"""
+    colored_mask = mask_to_colored_image(mask, use_overlay_colors=True)
 
-    # Créer l'overlay avec cv2.addWeighted sur l'image entière
+    # Créer l'overlay
     overlay = cv2.addWeighted(image, 1-alpha, colored_mask, alpha, 0)
 
     # Garder l'image originale là où il n'y a pas de détection
@@ -238,7 +357,257 @@ def overlay_mask_on_image(image, mask, alpha=0.5):
     result = image.copy()
     result[detection_mask] = overlay[detection_mask]
 
+    # Ajouter des contours pour mieux visualiser les zones détectées
+    for class_id in range(1, NUM_CLASSES):
+        class_mask = (mask == class_id).astype(np.uint8)
+        if np.any(class_mask):
+            contours, _ = cv2.findContours(class_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            color = CLASS_COLORS_OVERLAY[class_id]
+            cv2.drawContours(result, contours, -1, color, 2)
+
     return result
+
+
+def postprocess_mask(mask, min_area=50, apply_morphology=True):
+    """
+    Post-traitement du masque pour améliorer la qualité
+
+    Args:
+        mask: Masque de segmentation
+        min_area: Surface minimale pour garder une région
+        apply_morphology: Appliquer des opérations morphologiques
+    """
+    processed_mask = mask.copy()
+
+    if apply_morphology:
+        # Appliquer des opérations morphologiques par classe
+        for class_id in range(1, NUM_CLASSES):
+            class_mask = (mask == class_id).astype(np.uint8)
+
+            if np.any(class_mask):
+                # Fermeture pour combler les petits trous
+                kernel = np.ones((3, 3), np.uint8)
+                class_mask = cv2.morphologyEx(class_mask, cv2.MORPH_CLOSE, kernel)
+
+                # Ouverture pour enlever le bruit
+                class_mask = cv2.morphologyEx(class_mask, cv2.MORPH_OPEN, kernel)
+
+                # Supprimer les petites régions
+                num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(class_mask, connectivity=8)
+                for i in range(1, num_labels):
+                    if stats[i, cv2.CC_STAT_AREA] < min_area:
+                        class_mask[labels == i] = 0
+
+                # Mettre à jour le masque
+                processed_mask[class_mask > 0] = class_id
+
+    return processed_mask
+
+
+def enhance_detection_with_edge_analysis(image, mask):
+    """
+    Améliore la détection en utilisant l'analyse des contours de l'image
+
+    Args:
+        image: Image originale (RGB)
+        mask: Masque prédit par le modèle
+    """
+    # Convertir en niveaux de gris
+    if len(image.shape) == 3:
+        gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
+    else:
+        gray = image
+
+    # Détection de contours avec Canny
+    edges = cv2.Canny(gray, 50, 150)
+
+    # Dilater les contours
+    kernel = np.ones((3, 3), np.uint8)
+    edges_dilated = cv2.dilate(edges, kernel, iterations=1)
+
+    # Combiner avec le masque existant
+    enhanced_mask = mask.copy()
+
+    # Pour les zones où il y a des contours forts mais pas de détection,
+    # on peut suggérer une détection potentielle (avec précaution)
+    # Note: Ceci est une heuristique, pas une vraie amélioration de modèle
+
+    return enhanced_mask
+
+
+def create_detection_summary(mask):
+    """
+    Crée un résumé des détections dans le masque
+
+    Returns:
+        dict: Résumé des détections par classe
+    """
+    summary = {}
+
+    for class_id in range(1, NUM_CLASSES):
+        class_mask = (mask == class_id).astype(np.uint8)
+        pixel_count = np.sum(class_mask)
+
+        if pixel_count > 0:
+            # Trouver les composantes connexes
+            num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(
+                class_mask, connectivity=8
+            )
+
+            regions = []
+            for i in range(1, num_labels):
+                area = stats[i, cv2.CC_STAT_AREA]
+                x, y, w, h = stats[i, cv2.CC_STAT_LEFT], stats[i, cv2.CC_STAT_TOP], \
+                             stats[i, cv2.CC_STAT_WIDTH], stats[i, cv2.CC_STAT_HEIGHT]
+                centroid = centroids[i]
+                regions.append({
+                    'area': area,
+                    'bbox': (x, y, w, h),
+                    'centroid': centroid
+                })
+
+            summary[class_id] = {
+                'class_name': CLASS_NAMES[class_id],
+                'total_pixels': pixel_count,
+                'percentage': (pixel_count / mask.size) * 100,
+                'num_regions': num_labels - 1,
+                'regions': regions
+            }
+
+    return summary
+
+
+def heuristic_crack_detection(image):
+    """
+    Détection heuristique de fissures basée sur le traitement d'image
+    Cette méthode utilise des techniques classiques de vision par ordinateur
+    pour détecter les potentiels dommages routiers.
+
+    Args:
+        image: Image RGB (H, W, 3)
+
+    Returns:
+        mask: Masque de détection (H, W) avec les classes
+        confidence: Carte de confiance
+    """
+    h, w = image.shape[:2]
+    mask = np.zeros((h, w), dtype=np.uint8)
+    confidence = np.zeros((h, w), dtype=np.float32)
+
+    # Convertir en niveaux de gris
+    if len(image.shape) == 3:
+        gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
+    else:
+        gray = image.copy()
+
+    # 1. Améliorer le contraste avec CLAHE
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    enhanced = clahe.apply(gray)
+
+    # 2. Détection de contours avec Canny multi-échelle
+    edges_low = cv2.Canny(enhanced, 30, 100)
+    edges_high = cv2.Canny(enhanced, 50, 150)
+    edges = cv2.bitwise_or(edges_low, edges_high)
+
+    # 3. Détection des zones sombres (potentielles fissures)
+    # Les fissures apparaissent souvent comme des zones plus sombres
+    mean_val = np.mean(gray)
+    dark_threshold = mean_val * 0.7
+    dark_regions = (gray < dark_threshold).astype(np.uint8) * 255
+
+    # 4. Combiner les détections
+    combined = cv2.bitwise_or(edges, dark_regions)
+
+    # 5. Opérations morphologiques
+    kernel_small = np.ones((3, 3), np.uint8)
+    kernel_large = np.ones((5, 5), np.uint8)
+
+    # Fermeture pour connecter les fissures proches
+    combined = cv2.morphologyEx(combined, cv2.MORPH_CLOSE, kernel_small)
+
+    # Ouverture pour enlever le bruit
+    combined = cv2.morphologyEx(combined, cv2.MORPH_OPEN, kernel_small)
+
+    # 6. Analyse des composantes connexes
+    num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(
+        combined, connectivity=8
+    )
+
+    # 7. Classifier les régions détectées
+    for i in range(1, num_labels):
+        area = stats[i, cv2.CC_STAT_AREA]
+        x, y, w_box, h_box = stats[i, cv2.CC_STAT_LEFT], stats[i, cv2.CC_STAT_TOP], \
+                              stats[i, cv2.CC_STAT_WIDTH], stats[i, cv2.CC_STAT_HEIGHT]
+
+        # Filtrer les petites régions (bruit)
+        if area < 50:
+            continue
+
+        # Calculer les caractéristiques de la région
+        region_mask = (labels == i).astype(np.uint8)
+        aspect_ratio = w_box / max(h_box, 1)
+
+        # Classifier selon la forme
+        if area > 2000 and aspect_ratio > 0.5 and aspect_ratio < 2:
+            # Grande zone compacte -> Nid-de-poule
+            class_id = 4
+            conf = 0.4
+        elif aspect_ratio > 3:
+            # Très allongé horizontalement -> Fissure longitudinale
+            class_id = 1
+            conf = 0.5
+        elif aspect_ratio < 0.33:
+            # Très allongé verticalement -> Fissure transversale
+            class_id = 2
+            conf = 0.5
+        elif area > 500:
+            # Zone de taille moyenne avec forme complexe -> Crocodile
+            class_id = 3
+            conf = 0.3
+        else:
+            # Petite fissure par défaut
+            class_id = 1
+            conf = 0.25
+
+        # Appliquer la détection
+        mask[region_mask > 0] = class_id
+        confidence[region_mask > 0] = conf
+
+    return mask, confidence
+
+
+def detect_with_heuristics_and_model(image, model_mask, model_confidence, model_trained):
+    """
+    Combine la détection heuristique avec celle du modèle
+
+    Args:
+        image: Image originale
+        model_mask: Masque prédit par le modèle
+        model_confidence: Confiance du modèle
+        model_trained: Si le modèle est entraîné
+
+    Returns:
+        combined_mask, combined_confidence
+    """
+    if model_trained:
+        # Si le modèle est entraîné, lui faire confiance
+        return model_mask, model_confidence
+
+    # Sinon, combiner avec la détection heuristique
+    heuristic_mask, heuristic_conf = heuristic_crack_detection(image)
+
+    # Stratégie de combinaison:
+    # - Si le modèle détecte quelque chose avec confiance > 0.5, utiliser
+    # - Sinon, utiliser la détection heuristique
+    combined_mask = model_mask.copy()
+    combined_conf = model_confidence.copy()
+
+    # Ajouter les détections heuristiques là où le modèle n'a rien détecté
+    no_detection = (model_mask == 0)
+    combined_mask[no_detection] = heuristic_mask[no_detection]
+    combined_conf[no_detection] = heuristic_conf[no_detection]
+
+    return combined_mask, combined_conf
 
 
 # =============================================================================
@@ -328,9 +697,27 @@ def display_image_analysis():
     st.markdown("""
     Chargez une photo de route pour analyser les dommages avec nos 3 architectures de deep learning:
     - **U-Net**: Architecture de segmentation sémantique
-    - **YOLO**: Détection d'objets (bounding boxes converties en masque)
+    - **YOLO**: Détection d'objets avec segmentation
     - **Hybride**: Combinaison U-Net + YOLO avec attention gates
     """)
+
+    # Options avancées
+    with st.expander("Options avancées"):
+        use_heuristic = st.checkbox(
+            "Activer la détection heuristique",
+            value=True,
+            help="Combine la détection par deep learning avec des méthodes de traitement d'image classiques. Utile quand les modèles ne sont pas entraînés."
+        )
+        apply_postprocess = st.checkbox(
+            "Appliquer le post-traitement",
+            value=True,
+            help="Applique des opérations morphologiques pour nettoyer les masques."
+        )
+        overlay_alpha = st.slider(
+            "Transparence de l'overlay",
+            min_value=0.1, max_value=0.9, value=0.6,
+            help="Contrôle la transparence du masque sur l'image originale."
+        )
 
     # Upload de l'image
     uploaded_file = st.file_uploader(
@@ -381,8 +768,21 @@ def display_image_analysis():
                     status = "Entraîné" if unet_trained else "Non entraîné (poids aléatoires)"
                     st.caption(f"Statut: {status}")
 
+                    if not unet_trained:
+                        st.warning("Modèle non entraîné. Détection heuristique activée.")
+
                     with st.spinner("Analyse en cours..."):
                         mask, confidence, inf_time = predict_unet(unet_model, image_normalized)
+
+                        # Combiner avec la détection heuristique si activée
+                        if use_heuristic and not unet_trained:
+                            mask, confidence = detect_with_heuristics_and_model(
+                                image_resized, mask, confidence, unet_trained
+                            )
+
+                        # Post-traitement si activé
+                        if apply_postprocess:
+                            mask = postprocess_mask(mask, min_area=30)
 
                     results['U-Net'] = {
                         'mask': mask,
@@ -392,7 +792,7 @@ def display_image_analysis():
                     }
 
                     # Afficher le masque
-                    overlay = overlay_mask_on_image(image_resized, mask)
+                    overlay = overlay_mask_on_image(image_resized, mask, alpha=overlay_alpha)
                     st.image(overlay, caption="Segmentation U-Net", use_container_width=True)
 
                     # Masque seul
@@ -407,14 +807,37 @@ def display_image_analysis():
             with col2:
                 st.markdown("### YOLO")
                 with st.spinner("Chargement de YOLO..."):
-                    yolo_model, yolo_trained = load_yolo_model()
+                    yolo_result = load_yolo_model()
+                    if len(yolo_result) == 3:
+                        yolo_model, yolo_trained, yolo_type = yolo_result
+                    else:
+                        yolo_model, yolo_trained = yolo_result
+                        yolo_type = "detection"
 
                 if yolo_model is not None:
-                    status = "Entraîné sur RDD2022" if yolo_trained else "Pré-entraîné (COCO)"
+                    if yolo_trained:
+                        status = "Entraîné sur RDD2022"
+                    elif yolo_type == "segmentation":
+                        status = "Segmentation (COCO) - Simulation"
+                    else:
+                        status = "Détection (COCO) - Simulation"
                     st.caption(f"Statut: {status}")
 
+                    if not yolo_trained:
+                        st.warning("Modèle non entraîné. Détection heuristique activée.")
+
                     with st.spinner("Analyse en cours..."):
-                        mask, confidence, inf_time = predict_yolo(yolo_model, image_resized)
+                        mask, confidence, inf_time = predict_yolo(yolo_model, image_resized, yolo_type)
+
+                        # Combiner avec la détection heuristique si activée
+                        if use_heuristic and not yolo_trained:
+                            mask, confidence = detect_with_heuristics_and_model(
+                                image_resized, mask, confidence, yolo_trained
+                            )
+
+                        # Post-traitement si activé
+                        if apply_postprocess:
+                            mask = postprocess_mask(mask, min_area=30)
 
                     results['YOLO'] = {
                         'mask': mask,
@@ -424,7 +847,7 @@ def display_image_analysis():
                     }
 
                     # Afficher le masque
-                    overlay = overlay_mask_on_image(image_resized, mask)
+                    overlay = overlay_mask_on_image(image_resized, mask, alpha=overlay_alpha)
                     st.image(overlay, caption="Détection YOLO", use_container_width=True)
 
                     # Masque seul
@@ -445,8 +868,21 @@ def display_image_analysis():
                     status = "Entraîné" if hybrid_trained else "Non entraîné (poids aléatoires)"
                     st.caption(f"Statut: {status}")
 
+                    if not hybrid_trained:
+                        st.warning("Modèle non entraîné. Détection heuristique activée.")
+
                     with st.spinner("Analyse en cours..."):
                         mask, confidence, inf_time = predict_hybrid(hybrid_model, image_normalized)
+
+                        # Combiner avec la détection heuristique si activée
+                        if use_heuristic and not hybrid_trained:
+                            mask, confidence = detect_with_heuristics_and_model(
+                                image_resized, mask, confidence, hybrid_trained
+                            )
+
+                        # Post-traitement si activé
+                        if apply_postprocess:
+                            mask = postprocess_mask(mask, min_area=30)
 
                     results['Hybrid'] = {
                         'mask': mask,
@@ -456,7 +892,7 @@ def display_image_analysis():
                     }
 
                     # Afficher le masque
-                    overlay = overlay_mask_on_image(image_resized, mask)
+                    overlay = overlay_mask_on_image(image_resized, mask, alpha=overlay_alpha)
                     st.image(overlay, caption="Segmentation Hybride", use_container_width=True)
 
                     # Masque seul
@@ -517,10 +953,54 @@ def display_image_analysis():
                 st.subheader("Légende des Classes")
                 legend_cols = st.columns(5)
                 for idx, (class_id, class_name) in enumerate(CLASS_NAMES.items()):
-                    color = CLASS_COLORS[class_id]
+                    color = CLASS_COLORS_OVERLAY[class_id]
                     with legend_cols[idx]:
                         color_box = f'<div style="background-color: rgb{color}; width: 30px; height: 30px; display: inline-block; border: 1px solid black;"></div>'
                         st.markdown(f"{color_box} {class_name}", unsafe_allow_html=True)
+
+                # Détails des détections par modèle
+                st.subheader("Détails des Détections")
+                for model_name, res in results.items():
+                    with st.expander(f"Détails - {model_name}"):
+                        summary = create_detection_summary(res['mask'])
+                        if summary:
+                            for class_id, info in summary.items():
+                                st.markdown(f"**{info['class_name']}**")
+                                st.write(f"- Pixels détectés: {info['total_pixels']:,}")
+                                st.write(f"- Pourcentage de l'image: {info['percentage']:.2f}%")
+                                st.write(f"- Nombre de régions: {info['num_regions']}")
+                        else:
+                            st.info("Aucune détection pour ce modèle.")
+
+                # Avertissement si les modèles ne sont pas entraînés
+                untrained_models = [name for name, res in results.items() if not res['trained']]
+                if untrained_models:
+                    st.divider()
+                    st.subheader("Comment améliorer les résultats")
+                    st.warning(f"""
+                    **Les modèles suivants ne sont pas entraînés:** {', '.join(untrained_models)}
+
+                    Les résultats actuels sont générés avec des poids aléatoires (U-Net, Hybrid)
+                    ou un modèle pré-entraîné sur COCO (YOLO) qui ne reconnaît pas les dommages routiers.
+
+                    **Pour obtenir de vrais résultats, vous devez entraîner les modèles:**
+                    """)
+
+                    st.code("""
+# Pour entraîner U-Net:
+python training/train_unet.py
+
+# Pour entraîner le modèle Hybride:
+python training/train_hybrid.py
+
+# Pour entraîner YOLO sur RDD2022:
+python training/train_yolo.py
+                    """, language="bash")
+
+                    st.info("""
+                    **Après l'entraînement**, les poids seront sauvegardés dans `results/models/`
+                    et seront automatiquement chargés par l'interface.
+                    """)
 
 
 def display_preprocessing_results():
