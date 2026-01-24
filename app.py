@@ -87,75 +87,188 @@ CLASS_COLORS_OVERLAY = {
 # FONCTIONS DE CHARGEMENT DES MODÈLES
 # =============================================================================
 
+# Import de la configuration des chemins des modèles
+try:
+    from model_paths import (
+        UNET_MODEL_PATH, HYBRID_MODEL_PATH, YOLO_MODEL_PATH,
+        MODELS_DIRECTORY as EXTERNAL_MODELS_DIR,
+        YOLO_WEIGHTS_DIRECTORY as EXTERNAL_YOLO_DIR,
+        UNET_MODEL_FILENAME as UNET_MODEL_FILE,
+        HYBRID_MODEL_FILENAME as HYBRID_MODEL_FILE,
+        YOLO_MODEL_FILENAME as YOLO_MODEL_FILE
+    )
+    MODEL_PATHS_LOADED = True
+except ImportError:
+    # Chemins par défaut si le fichier de config n'existe pas
+    EXTERNAL_MODELS_DIR = Path("C:/Users/DELL/Desktop/deeplearningproject-xo/modelss")
+    EXTERNAL_YOLO_DIR = Path("C:/Users/DELL/Desktop/deeplearningproject-xo/yolo_temp_results/yolo_100img_20260115_215355/weights")
+    UNET_MODEL_FILE = "unet_100img_20260109_232107.keras"
+    HYBRID_MODEL_FILE = "hybrid_100img_20260110_231216.keras"
+    YOLO_MODEL_FILE = "best.pt"
+    UNET_MODEL_PATH = EXTERNAL_MODELS_DIR / UNET_MODEL_FILE
+    HYBRID_MODEL_PATH = EXTERNAL_MODELS_DIR / HYBRID_MODEL_FILE
+    YOLO_MODEL_PATH = EXTERNAL_YOLO_DIR / YOLO_MODEL_FILE
+    MODEL_PATHS_LOADED = False
+
+
 @st.cache_resource
 def load_unet_model():
-    """Charge le modèle U-Net"""
+    """Charge le modèle U-Net avec recherche dans plusieurs emplacements"""
     try:
+        from tensorflow import keras
+
+        # Liste des chemins possibles pour le modèle U-Net (en ordre de priorité)
+        possible_paths = [
+            # Chemin configuré dans model_paths.py
+            UNET_MODEL_PATH,
+            # Chemin externe Windows (modèle complet .keras)
+            EXTERNAL_MODELS_DIR / UNET_MODEL_FILE,
+            # Chemins dans le projet
+            MODELS_DIR / "unet_best.keras",
+            MODELS_DIR / "unet_best.h5",
+            MODELS_DIR / UNET_MODEL_FILE,
+            # Chemin relatif
+            BASE_DIR / "modelss" / UNET_MODEL_FILE,
+        ]
+
+        # Chercher le modèle
+        for model_path in possible_paths:
+            if model_path.exists():
+                st.success(f"U-Net chargé depuis: {model_path}")
+                if str(model_path).endswith('.keras'):
+                    # Charger le modèle complet (architecture + poids)
+                    model = keras.models.load_model(str(model_path), compile=False)
+                else:
+                    # Charger uniquement les poids
+                    from models.unet_scratch import create_unet_model
+                    model = create_unet_model(
+                        input_shape=(256, 256, 3),
+                        num_classes=NUM_CLASSES,
+                        compile_model=False
+                    )
+                    model.load_weights(str(model_path))
+                return model, True
+
+        # Si aucun modèle trouvé, créer un modèle vide
+        st.info("U-Net: Aucun modèle entraîné trouvé, utilisation de poids aléatoires")
         from models.unet_scratch import create_unet_model
         model = create_unet_model(
             input_shape=(256, 256, 3),
             num_classes=NUM_CLASSES,
             compile_model=False
         )
-        # Chercher les poids sauvegardés
-        weights_path = MODELS_DIR / "unet_best.h5"
-        if weights_path.exists():
-            model.load_weights(str(weights_path))
-            return model, True
         return model, False
+
     except Exception as e:
         st.warning(f"Impossible de charger U-Net: {e}")
+        import traceback
+        traceback.print_exc()
         return None, False
 
 
 @st.cache_resource
 def load_hybrid_model():
-    """Charge le modèle Hybride"""
+    """Charge le modèle Hybride avec recherche dans plusieurs emplacements"""
     try:
+        from tensorflow import keras
+
+        # Liste des chemins possibles pour le modèle Hybride (en ordre de priorité)
+        possible_paths = [
+            # Chemin configuré dans model_paths.py
+            HYBRID_MODEL_PATH,
+            # Chemin externe Windows (modèle complet .keras)
+            EXTERNAL_MODELS_DIR / HYBRID_MODEL_FILE,
+            # Chemins dans le projet
+            MODELS_DIR / "hybrid_best.keras",
+            MODELS_DIR / "hybrid_best.h5",
+            MODELS_DIR / HYBRID_MODEL_FILE,
+            # Chemin relatif
+            BASE_DIR / "modelss" / HYBRID_MODEL_FILE,
+        ]
+
+        # Chercher le modèle
+        for model_path in possible_paths:
+            if model_path.exists():
+                st.success(f"Hybrid chargé depuis: {model_path}")
+                if str(model_path).endswith('.keras'):
+                    # Charger le modèle complet (architecture + poids)
+                    model = keras.models.load_model(str(model_path), compile=False)
+                else:
+                    # Charger uniquement les poids
+                    from models.hybrid_model import create_hybrid_model
+                    model = create_hybrid_model(
+                        input_shape=(256, 256, 3),
+                        num_classes=NUM_CLASSES,
+                        compile_model=False
+                    )
+                    model.load_weights(str(model_path))
+                return model, True
+
+        # Si aucun modèle trouvé, créer un modèle vide
+        st.info("Hybrid: Aucun modèle entraîné trouvé, utilisation de poids aléatoires")
         from models.hybrid_model import create_hybrid_model
         model = create_hybrid_model(
             input_shape=(256, 256, 3),
             num_classes=NUM_CLASSES,
             compile_model=False
         )
-        # Chercher les poids sauvegardés
-        weights_path = MODELS_DIR / "hybrid_best.h5"
-        if weights_path.exists():
-            model.load_weights(str(weights_path))
-            return model, True
         return model, False
+
     except Exception as e:
         st.warning(f"Impossible de charger Hybrid: {e}")
+        import traceback
+        traceback.print_exc()
         return None, False
 
 
 @st.cache_resource
 def load_yolo_model():
-    """Charge le modèle YOLO - Préférence pour le modèle de segmentation"""
+    """Charge le modèle YOLO avec recherche dans plusieurs emplacements"""
     try:
         from ultralytics import YOLO
 
-        # Priorité 1: Modèle YOLO entraîné sur RDD2022
-        trained_path = MODELS_DIR / "yolo_best.pt"
-        if trained_path.exists():
-            model = YOLO(str(trained_path))
-            return model, True, "trained"
+        # Liste des chemins possibles pour le modèle YOLO entraîné (en ordre de priorité)
+        possible_paths = [
+            # Chemin configuré dans model_paths.py
+            YOLO_MODEL_PATH,
+            # Chemin externe Windows (modèle entraîné)
+            EXTERNAL_YOLO_DIR / YOLO_MODEL_FILE,
+            EXTERNAL_YOLO_DIR / "last.pt",
+            # Chemins dans le projet
+            MODELS_DIR / "yolo_best.pt",
+            MODELS_DIR / "best.pt",
+            # Chemin relatif
+            BASE_DIR / "yolo_temp_results" / "weights" / "best.pt",
+        ]
 
-        # Priorité 2: Modèle de segmentation pré-entraîné (meilleur pour les masques)
+        # Chercher le modèle entraîné
+        for model_path in possible_paths:
+            if model_path.exists():
+                st.success(f"YOLO chargé depuis: {model_path}")
+                model = YOLO(str(model_path))
+                return model, True, "trained"
+
+        # Modèle de segmentation pré-entraîné
         seg_path = BASE_DIR / "yolov8n-seg.pt"
         if seg_path.exists():
             model = YOLO(str(seg_path))
             return model, False, "segmentation"
 
-        # Priorité 3: Modèle de détection pré-entraîné
+        # Modèle de détection pré-entraîné
         pretrained_path = BASE_DIR / "yolov8n.pt"
         if pretrained_path.exists():
             model = YOLO(str(pretrained_path))
             return model, False, "detection"
 
-        return None, False, None
+        # Télécharger le modèle par défaut
+        st.info("YOLO: Aucun modèle entraîné trouvé, téléchargement du modèle pré-entraîné")
+        model = YOLO("yolov8n.pt")
+        return model, False, "detection"
+
     except Exception as e:
         st.warning(f"Impossible de charger YOLO: {e}")
+        import traceback
+        traceback.print_exc()
         return None, False, None
 
 
