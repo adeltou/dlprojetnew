@@ -138,6 +138,10 @@ def load_unet_model():
                 if str(model_path).endswith('.keras'):
                     # Charger le modèle complet (architecture + poids)
                     model = keras.models.load_model(str(model_path), compile=False)
+                    # Afficher les informations du modèle
+                    output_shape = model.output_shape
+                    num_classes_model = output_shape[-1] if output_shape else "?"
+                    st.info(f"Modèle U-Net: output_shape={output_shape}, classes={num_classes_model}")
                 else:
                     # Charger uniquement les poids
                     from models.unet_scratch import create_unet_model
@@ -193,6 +197,10 @@ def load_hybrid_model():
                 if str(model_path).endswith('.keras'):
                     # Charger le modèle complet (architecture + poids)
                     model = keras.models.load_model(str(model_path), compile=False)
+                    # Afficher les informations du modèle
+                    output_shape = model.output_shape
+                    num_classes_model = output_shape[-1] if output_shape else "?"
+                    st.info(f"Modèle Hybrid: output_shape={output_shape}, classes={num_classes_model}")
                 else:
                     # Charger uniquement les poids
                     from models.hybrid_model import create_hybrid_model
@@ -298,6 +306,10 @@ def preprocess_image(image, target_size=IMG_SIZE):
 
 def predict_unet(model, image_normalized):
     """Effectue une prédiction avec U-Net"""
+    # Debug: vérifier l'input
+    print(f"[DEBUG U-Net] Input shape: {image_normalized.shape}")
+    print(f"[DEBUG U-Net] Input min: {image_normalized.min():.4f}, max: {image_normalized.max():.4f}")
+
     # Ajouter la dimension batch
     input_tensor = np.expand_dims(image_normalized, axis=0)
 
@@ -306,15 +318,43 @@ def predict_unet(model, image_normalized):
     prediction = model.predict(input_tensor, verbose=0)
     inference_time = time.time() - start_time
 
+    # Debug: afficher les informations sur la prédiction
+    pred_shape = prediction.shape
+    num_classes = pred_shape[-1]
+    print(f"[DEBUG U-Net] Prediction shape: {pred_shape}, Num classes: {num_classes}")
+    print(f"[DEBUG U-Net] Prediction min: {prediction.min():.6f}, max: {prediction.max():.6f}")
+
+    # Afficher les probabilités moyennes par classe
+    for c in range(num_classes):
+        class_prob = prediction[0, :, :, c]
+        print(f"[DEBUG U-Net] Classe {c}: mean={class_prob.mean():.6f}, max={class_prob.max():.6f}")
+
     # Récupérer le masque de segmentation
-    mask = np.argmax(prediction[0], axis=-1)
+    mask = np.argmax(prediction[0], axis=-1).astype(np.uint8)
     confidence = np.max(prediction[0], axis=-1)
+
+    # Debug: afficher les classes prédites
+    unique_classes = np.unique(mask)
+    print(f"[DEBUG U-Net] Classes prédites: {unique_classes}")
+    print(f"[DEBUG U-Net] Distribution: {[(c, np.sum(mask == c)) for c in unique_classes]}")
+
+    # Si le modèle a été entraîné avec 6 classes (0-5) mais qu'on attend 5 (0-4),
+    # on doit peut-être remapper
+    if num_classes == 6:
+        # Le modèle utilise probablement: 0=bg, 1=D00, 2=D10, 3=D20, 4=unused, 5=D40
+        # Remapper la classe 5 vers 4 si nécessaire
+        mask[mask == 5] = 4
+        print(f"[DEBUG U-Net] Remapping classe 5 -> 4 (6 classes model)")
 
     return mask, confidence, inference_time
 
 
 def predict_hybrid(model, image_normalized):
     """Effectue une prédiction avec le modèle Hybride"""
+    # Debug: vérifier l'input
+    print(f"[DEBUG Hybrid] Input shape: {image_normalized.shape}")
+    print(f"[DEBUG Hybrid] Input min: {image_normalized.min():.4f}, max: {image_normalized.max():.4f}")
+
     # Ajouter la dimension batch
     input_tensor = np.expand_dims(image_normalized, axis=0)
 
@@ -323,9 +363,30 @@ def predict_hybrid(model, image_normalized):
     prediction = model.predict(input_tensor, verbose=0)
     inference_time = time.time() - start_time
 
+    # Debug: afficher les informations sur la prédiction
+    pred_shape = prediction.shape
+    num_classes = pred_shape[-1]
+    print(f"[DEBUG Hybrid] Prediction shape: {pred_shape}, Num classes: {num_classes}")
+    print(f"[DEBUG Hybrid] Prediction min: {prediction.min():.6f}, max: {prediction.max():.6f}")
+
+    # Afficher les probabilités moyennes par classe
+    for c in range(num_classes):
+        class_prob = prediction[0, :, :, c]
+        print(f"[DEBUG Hybrid] Classe {c}: mean={class_prob.mean():.6f}, max={class_prob.max():.6f}")
+
     # Récupérer le masque de segmentation
-    mask = np.argmax(prediction[0], axis=-1)
+    mask = np.argmax(prediction[0], axis=-1).astype(np.uint8)
     confidence = np.max(prediction[0], axis=-1)
+
+    # Debug: afficher les classes prédites
+    unique_classes = np.unique(mask)
+    print(f"[DEBUG Hybrid] Classes prédites: {unique_classes}")
+    print(f"[DEBUG Hybrid] Distribution: {[(c, np.sum(mask == c)) for c in unique_classes]}")
+
+    # Si le modèle a été entraîné avec 6 classes
+    if num_classes == 6:
+        mask[mask == 5] = 4
+        print(f"[DEBUG Hybrid] Remapping classe 5 -> 4 (6 classes model)")
 
     return mask, confidence, inference_time
 
@@ -400,18 +461,10 @@ def predict_yolo(model, image, model_type="detection"):
                     # Modèle entraîné: mapping direct
                     damage_class = cls + 1 if cls < 4 else 4
 
-                # Créer un masque elliptique au lieu d'un rectangle
-                # pour un résultat plus réaliste
-                center_x = (px1 + px2) // 2
-                center_y = (py1 + py2) // 2
-                axis_x = (px2 - px1) // 2
-                axis_y = (py2 - py1) // 2
-
-                if axis_x > 0 and axis_y > 0:
-                    cv2.ellipse(mask, (center_x, center_y), (axis_x, axis_y),
-                               0, 0, 360, int(damage_class), -1)
-                    cv2.ellipse(confidence_map, (center_x, center_y), (axis_x, axis_y),
-                               0, 0, 360, conf, -1)
+                # Utiliser un rectangle simple au lieu d'ellipse
+                # (évite les problèmes avec cv2.ellipse)
+                mask[py1:py2, px1:px2] = int(damage_class)
+                confidence_map[py1:py2, px1:px2] = float(conf)
 
     return mask, confidence_map, inference_time
 
