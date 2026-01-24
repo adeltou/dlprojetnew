@@ -304,8 +304,15 @@ def preprocess_image(image, target_size=IMG_SIZE):
     return image_resized, image_normalized
 
 
-def predict_unet(model, image_normalized):
-    """Effectue une prédiction avec U-Net"""
+def predict_unet(model, image_normalized, damage_threshold=0.04):
+    """
+    Effectue une prédiction avec U-Net
+
+    Args:
+        model: Modèle U-Net
+        image_normalized: Image normalisée
+        damage_threshold: Seuil minimum pour détecter un dommage (défaut: 4%)
+    """
     # Debug: vérifier l'input
     print(f"[DEBUG U-Net] Input shape: {image_normalized.shape}")
     print(f"[DEBUG U-Net] Input min: {image_normalized.min():.4f}, max: {image_normalized.max():.4f}")
@@ -329,28 +336,44 @@ def predict_unet(model, image_normalized):
         class_prob = prediction[0, :, :, c]
         print(f"[DEBUG U-Net] Classe {c}: mean={class_prob.mean():.6f}, max={class_prob.max():.6f}")
 
-    # Récupérer le masque de segmentation
-    mask = np.argmax(prediction[0], axis=-1).astype(np.uint8)
-    confidence = np.max(prediction[0], axis=-1)
+    # NOUVELLE APPROCHE: Détection basée sur des seuils
+    # Au lieu de simplement argmax, on détecte les dommages si leur probabilité dépasse le seuil
+    probs = prediction[0]  # Shape: (H, W, num_classes)
 
-    # Debug: afficher les classes prédites
+    # Commencer avec un masque vide (tout background)
+    mask = np.zeros((probs.shape[0], probs.shape[1]), dtype=np.uint8)
+    confidence = probs[:, :, 0].copy()  # Confiance initiale = probabilité du background
+
+    # Pour chaque classe de dommage (1 à num_classes-1), vérifier si elle dépasse le seuil
+    for class_id in range(1, num_classes):
+        class_prob = probs[:, :, class_id]
+        # Détecter où cette classe dépasse le seuil ET a une probabilité plus élevée que la détection actuelle
+        detected = (class_prob > damage_threshold) & (class_prob > confidence)
+        mask[detected] = class_id
+        confidence[detected] = class_prob[detected]
+
+    # Debug: afficher les classes prédites après seuillage
     unique_classes = np.unique(mask)
-    print(f"[DEBUG U-Net] Classes prédites: {unique_classes}")
-    print(f"[DEBUG U-Net] Distribution: {[(c, np.sum(mask == c)) for c in unique_classes]}")
+    print(f"[DEBUG U-Net] Classes prédites (seuil={damage_threshold}): {unique_classes}")
+    print(f"[DEBUG U-Net] Distribution: {[(int(c), int(np.sum(mask == c))) for c in unique_classes]}")
 
-    # Si le modèle a été entraîné avec 6 classes (0-5) mais qu'on attend 5 (0-4),
-    # on doit peut-être remapper
+    # Si le modèle a été entraîné avec 6 classes
     if num_classes == 6:
-        # Le modèle utilise probablement: 0=bg, 1=D00, 2=D10, 3=D20, 4=unused, 5=D40
-        # Remapper la classe 5 vers 4 si nécessaire
         mask[mask == 5] = 4
         print(f"[DEBUG U-Net] Remapping classe 5 -> 4 (6 classes model)")
 
     return mask, confidence, inference_time
 
 
-def predict_hybrid(model, image_normalized):
-    """Effectue une prédiction avec le modèle Hybride"""
+def predict_hybrid(model, image_normalized, damage_threshold=0.04):
+    """
+    Effectue une prédiction avec le modèle Hybride
+
+    Args:
+        model: Modèle Hybride
+        image_normalized: Image normalisée
+        damage_threshold: Seuil minimum pour détecter un dommage (défaut: 4%)
+    """
     # Debug: vérifier l'input
     print(f"[DEBUG Hybrid] Input shape: {image_normalized.shape}")
     print(f"[DEBUG Hybrid] Input min: {image_normalized.min():.4f}, max: {image_normalized.max():.4f}")
@@ -374,14 +397,25 @@ def predict_hybrid(model, image_normalized):
         class_prob = prediction[0, :, :, c]
         print(f"[DEBUG Hybrid] Classe {c}: mean={class_prob.mean():.6f}, max={class_prob.max():.6f}")
 
-    # Récupérer le masque de segmentation
-    mask = np.argmax(prediction[0], axis=-1).astype(np.uint8)
-    confidence = np.max(prediction[0], axis=-1)
+    # NOUVELLE APPROCHE: Détection basée sur des seuils
+    probs = prediction[0]  # Shape: (H, W, num_classes)
 
-    # Debug: afficher les classes prédites
+    # Commencer avec un masque vide (tout background)
+    mask = np.zeros((probs.shape[0], probs.shape[1]), dtype=np.uint8)
+    confidence = probs[:, :, 0].copy()  # Confiance initiale = probabilité du background
+
+    # Pour chaque classe de dommage (1 à num_classes-1), vérifier si elle dépasse le seuil
+    for class_id in range(1, num_classes):
+        class_prob = probs[:, :, class_id]
+        # Détecter où cette classe dépasse le seuil ET a une probabilité plus élevée que la détection actuelle
+        detected = (class_prob > damage_threshold) & (class_prob > confidence)
+        mask[detected] = class_id
+        confidence[detected] = class_prob[detected]
+
+    # Debug: afficher les classes prédites après seuillage
     unique_classes = np.unique(mask)
-    print(f"[DEBUG Hybrid] Classes prédites: {unique_classes}")
-    print(f"[DEBUG Hybrid] Distribution: {[(c, np.sum(mask == c)) for c in unique_classes]}")
+    print(f"[DEBUG Hybrid] Classes prédites (seuil={damage_threshold}): {unique_classes}")
+    print(f"[DEBUG Hybrid] Distribution: {[(int(c), int(np.sum(mask == c))) for c in unique_classes]}")
 
     # Si le modèle a été entraîné avec 6 classes
     if num_classes == 6:
@@ -869,9 +903,14 @@ def display_image_analysis():
 
     # Options avancées
     with st.expander("Options avancées"):
+        damage_threshold = st.slider(
+            "Seuil de détection des dommages",
+            min_value=0.01, max_value=0.20, value=0.04, step=0.01,
+            help="Seuil minimum de probabilité pour détecter un dommage. Plus bas = plus sensible (plus de détections). Recommandé: 0.03-0.06"
+        )
         use_heuristic = st.checkbox(
             "Activer la détection heuristique",
-            value=True,
+            value=False,
             help="Combine la détection par deep learning avec des méthodes de traitement d'image classiques. Utile quand les modèles ne sont pas entraînés."
         )
         apply_postprocess = st.checkbox(
@@ -938,7 +977,7 @@ def display_image_analysis():
                         st.warning("Modèle non entraîné. Détection heuristique activée.")
 
                     with st.spinner("Analyse en cours..."):
-                        mask, confidence, inf_time = predict_unet(unet_model, image_normalized)
+                        mask, confidence, inf_time = predict_unet(unet_model, image_normalized, damage_threshold)
 
                         # Combiner avec la détection heuristique si activée
                         if use_heuristic and not unet_trained:
@@ -1038,7 +1077,7 @@ def display_image_analysis():
                         st.warning("Modèle non entraîné. Détection heuristique activée.")
 
                     with st.spinner("Analyse en cours..."):
-                        mask, confidence, inf_time = predict_hybrid(hybrid_model, image_normalized)
+                        mask, confidence, inf_time = predict_hybrid(hybrid_model, image_normalized, damage_threshold)
 
                         # Combiner avec la détection heuristique si activée
                         if use_heuristic and not hybrid_trained:
